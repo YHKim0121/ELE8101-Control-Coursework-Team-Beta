@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 def simulate_true_system(n_steps, dt, process_std, p0, v0):
@@ -136,6 +137,28 @@ def main():
     print("===== STEP 1 RESULTS =====")
     print(f"Position RMSE: {pos_rmse:.3f} m")
     print(f"Velocity RMSE: {vel_rmse:.3f} m/s")
+
+    t = np.arange(n_steps) * dt
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(t, x_true[0, :], label="True position")
+    plt.plot(t, x_hat[0, :], "--", label="Estimated position")
+    plt.xlabel("Time [s]")
+    plt.ylabel("Position [m]")
+    plt.title("True vs Estimated Position")
+    plt.grid(True)
+    plt.legend()
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(t, x_true[1, :], label="True velocity")
+    plt.plot(t, x_hat[1, :], "--", label="Estimated velocity")
+    plt.xlabel("Time [s]")
+    plt.ylabel("Velocity [m/s]")
+    plt.title("True vs Estimated Velocity")
+    plt.grid(True)
+    plt.legend()
+
+    plt.show()
 
 
 if __name__ == "__main__":
