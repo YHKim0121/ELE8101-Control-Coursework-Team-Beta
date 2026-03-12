@@ -95,6 +95,10 @@ def ekf(beacons, z, dt, Q, R, x0_hat, P0):
     return x_hat, P_hist
 
 
+def compute_rmse(true_signal, est_signal):
+    return np.sqrt(np.mean((true_signal - est_signal) ** 2))
+
+
 def main():
     np.random.seed(42)
 
@@ -126,11 +130,12 @@ def main():
 
     x_hat, _ = ekf(beacons, z, dt, Q, R, x0_hat, P0)
 
-    print("Last estimated position:")
-    print(x_hat[0, -1])
+    pos_rmse = compute_rmse(x_true[0, :], x_hat[0, :])
+    vel_rmse = compute_rmse(x_true[1, :], x_hat[1, :])
 
-    print("Last estimated velocity:")
-    print(x_hat[1, -1])
+    print("===== STEP 1 RESULTS =====")
+    print(f"Position RMSE: {pos_rmse:.3f} m")
+    print(f"Velocity RMSE: {vel_rmse:.3f} m/s")
 
 
 if __name__ == "__main__":
