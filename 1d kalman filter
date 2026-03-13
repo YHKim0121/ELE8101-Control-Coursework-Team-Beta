@@ -37,3 +37,29 @@ def time_update(sigma_mu, x_mu):
     x_tu = A @ x_mu
     sigma_tu = A @ sigma_mu @ A.T + Q_val * (G @ G.T)
     return sigma_tu, x_tu
+# --- 3. RUNNING THE SIMULATION ---
+n_sim = 3000 
+x_true = x0_tilde.copy()
+sigma_tu, x_tu = P0, x0_tilde.copy()
+
+true_history = np.zeros((n_sim, 2))
+est_history = np.zeros((n_sim, 2))
+sigma_p_history = np.zeros(n_sim)
+sigma_v_history = np.zeros(n_sim)
+
+for t in range(n_sim):
+    w = np.random.normal(0, np.sqrt(Q_val))
+    x_true = A @ x_true + G * w
+    true_history[t, :] = x_true.T
+    
+    v_noise = np.random.normal(0, np.sqrt(R_val))
+    y = C @ x_true + v_noise
+    
+    sigma_mu, x_mu = measurement_update(sigma_tu, x_tu, y)
+    est_history[t, :] = x_mu.T
+    sigma_p_history[t] = np.sqrt(sigma_mu[0, 0])
+    sigma_v_history[t] = np.sqrt(sigma_mu[1, 1])
+    
+    sigma_tu, x_tu = time_update(sigma_mu, x_mu)
+
+t_axis = np.arange(n_sim) * h
