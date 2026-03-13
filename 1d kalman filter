@@ -1,0 +1,98 @@
+try:
+    import numpy as np
+    import matplotlib.pyplot as plt
+except ImportError as e:
+    pkg = e.name if hasattr(e, 'name') else str(e)
+    print(f"Missing dependency: {pkg}.\nPlease install it using 'python -m pip install numpy matplotlib'.")
+# --- 1. PROBLEM DATA & PARAMETERS ---
+h = 0.01                # 100 Hz measurement frequency 
+v_start = 16.0          # Chosen speed: 16 m/s 
+std_dev_sensor = 1.5    # Required sensor noise 
+
+Q_val = 0.1             # Process noise (how much the car's speed fluctuates)
+R_val = std_dev_sensor**2 
+
+# A: State Transition Matrix (Position = Pos + Vel * h)
+A = np.array([[1, h], 
+              [0, 1]])
+
+# G: Noise Matrix (Noise affects the velocity change)
+G = np.array([[0], 
+              [1]])
+
+# C: Measurement Matrix (Sensor only reads position)
+C = np.array([[1, 0]])
+
+# Initial guesses
+x0_tilde = np.array([[0], [v_start]]) 
+P0 = np.array([[10, 0], [0, 1]]) 
+# --- 2. KALMAN FILTER FUNCTIONS ---
+def measurement_update(sigma_tu, x_tu, y):
+    z = C @ sigma_tu @ C.T + R_val
+    x_mu = x_tu + sigma_tu @ C.T @ np.linalg.solve(z, y - C @ x_tu)
+    sigma_mu = sigma_tu - sigma_tu @ C.T @ np.linalg.solve(z, C @ sigma_tu)
+    return sigma_mu, x_mu
+
+def time_update(sigma_mu, x_mu):
+    x_tu = A @ x_mu
+    sigma_tu = A @ sigma_mu @ A.T + Q_val * (G @ G.T)
+    return sigma_tu, x_tu
+# --- 3. RUNNING THE SIMULATION ---
+n_sim = 3000 
+x_true = x0_tilde.copy()
+sigma_tu, x_tu = P0, x0_tilde.copy()
+
+true_history = np.zeros((n_sim, 2))
+est_history = np.zeros((n_sim, 2))
+sigma_p_history = np.zeros(n_sim)
+sigma_v_history = np.zeros(n_sim)
+
+for t in range(n_sim):
+    w = np.random.normal(0, np.sqrt(Q_val))
+    x_true = A @ x_true + G * w
+    true_history[t, :] = x_true.T
+    
+    v_noise = np.random.normal(0, np.sqrt(R_val))
+    y = C @ x_true + v_noise
+    
+    sigma_mu, x_mu = measurement_update(sigma_tu, x_tu, y)
+    est_history[t, :] = x_mu.T
+    sigma_p_history[t] = np.sqrt(sigma_mu[0, 0])
+    sigma_v_history[t] = np.sqrt(sigma_mu[1, 1])
+    
+    sigma_tu, x_tu = time_update(sigma_mu, x_mu)
+
+t_axis = np.arange(n_sim) * h
+# --- 4. THE FOUR REQUIRED PLOTS ---
+fig, axs = plt.subplots(2, 2, figsize=(15, 10))
+
+# Plot 1: Position
+axs[0, 0].plot(t_axis, true_history[:, 0], 'g', label='Actual Position')
+axs[0, 0].plot(t_axis, est_history[:, 0], 'b--', label='Estimated Position')
+axs[0, 0].set_title("Vehicle Position")
+axs[0, 0].legend()
+
+# Plot 2: Velocity
+axs[0, 1].plot(t_axis, true_history[:, 1], 'g', label='Actual Velocity')
+axs[0, 1].plot(t_axis, est_history[:, 1], 'r--', label='Estimated Velocity')
+axs[0, 1].set_title("Vehicle Velocity")
+axs[0, 1].legend()
+
+# Plot 3: Position Error
+pos_error = true_history[:, 0] - est_history[:, 0]
+axs[1, 0].plot(t_axis, pos_error, 'k', label='Position Error')
+axs[1, 0].plot(t_axis, 3*sigma_p_history, 'r--', label='3-Sigma Bound')
+axs[1, 0].plot(t_axis, -3*sigma_p_history, 'r--')
+axs[1, 0].set_title("Position Error [m]")
+axs[1, 0].legend()
+
+# Plot 4: Velocity Error
+vel_error = true_history[:, 1] - est_history[:, 1]
+axs[1, 1].plot(t_axis, vel_error, 'k', label='Velocity Error')
+axs[1, 1].plot(t_axis, 3*sigma_v_history, 'r--', label='3-Sigma Bound')
+axs[1, 1].plot(t_axis, -3*sigma_v_history, 'r--')
+axs[1, 1].set_title("Velocity Error [m/s]")
+axs[1, 1].legend()
+
+plt.tight_layout()
+plt.show()
