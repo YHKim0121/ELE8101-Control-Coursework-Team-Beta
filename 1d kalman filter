@@ -1,0 +1,28 @@
+try:
+    import numpy as np
+    import matplotlib.pyplot as plt
+except ImportError as e:
+    pkg = e.name if hasattr(e, 'name') else str(e)
+    print(f"Missing dependency: {pkg}.\nPlease install it using 'python -m pip install numpy matplotlib'.")
+# --- 1. PROBLEM DATA & PARAMETERS ---
+h = 0.01                # 100 Hz measurement frequency 
+v_start = 16.0          # Chosen speed: 16 m/s 
+std_dev_sensor = 1.5    # Required sensor noise 
+
+Q_val = 0.1             # Process noise (how much the car's speed fluctuates)
+R_val = std_dev_sensor**2 
+
+# A: State Transition Matrix (Position = Pos + Vel * h)
+A = np.array([[1, h], 
+              [0, 1]])
+
+# G: Noise Matrix (Noise affects the velocity change)
+G = np.array([[0], 
+              [1]])
+
+# C: Measurement Matrix (Sensor only reads position)
+C = np.array([[1, 0]])
+
+# Initial guesses
+x0_tilde = np.array([[0], [v_start]]) 
+P0 = np.array([[10, 0], [0, 1]]) 
