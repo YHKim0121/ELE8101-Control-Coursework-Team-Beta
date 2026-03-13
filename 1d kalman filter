@@ -26,3 +26,14 @@ C = np.array([[1, 0]])
 # Initial guesses
 x0_tilde = np.array([[0], [v_start]]) 
 P0 = np.array([[10, 0], [0, 1]]) 
+# --- 2. KALMAN FILTER FUNCTIONS ---
+def measurement_update(sigma_tu, x_tu, y):
+    z = C @ sigma_tu @ C.T + R_val
+    x_mu = x_tu + sigma_tu @ C.T @ np.linalg.solve(z, y - C @ x_tu)
+    sigma_mu = sigma_tu - sigma_tu @ C.T @ np.linalg.solve(z, C @ sigma_tu)
+    return sigma_mu, x_mu
+
+def time_update(sigma_mu, x_mu):
+    x_tu = A @ x_mu
+    sigma_tu = A @ sigma_mu @ A.T + Q_val * (G @ G.T)
+    return sigma_tu, x_tu
