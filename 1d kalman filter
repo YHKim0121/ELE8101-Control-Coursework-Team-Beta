@@ -63,3 +63,36 @@ for t in range(n_sim):
     sigma_tu, x_tu = time_update(sigma_mu, x_mu)
 
 t_axis = np.arange(n_sim) * h
+# --- 4. THE FOUR REQUIRED PLOTS ---
+fig, axs = plt.subplots(2, 2, figsize=(15, 10))
+
+# Plot 1: Position
+axs[0, 0].plot(t_axis, true_history[:, 0], 'g', label='Actual Position')
+axs[0, 0].plot(t_axis, est_history[:, 0], 'b--', label='Estimated Position')
+axs[0, 0].set_title("Vehicle Position")
+axs[0, 0].legend()
+
+# Plot 2: Velocity
+axs[0, 1].plot(t_axis, true_history[:, 1], 'g', label='Actual Velocity')
+axs[0, 1].plot(t_axis, est_history[:, 1], 'r--', label='Estimated Velocity')
+axs[0, 1].set_title("Vehicle Velocity")
+axs[0, 1].legend()
+
+# Plot 3: Position Error
+pos_error = true_history[:, 0] - est_history[:, 0]
+axs[1, 0].plot(t_axis, pos_error, 'k', label='Position Error')
+axs[1, 0].plot(t_axis, 3*sigma_p_history, 'r--', label='3-Sigma Bound')
+axs[1, 0].plot(t_axis, -3*sigma_p_history, 'r--')
+axs[1, 0].set_title("Position Error [m]")
+axs[1, 0].legend()
+
+# Plot 4: Velocity Error
+vel_error = true_history[:, 1] - est_history[:, 1]
+axs[1, 1].plot(t_axis, vel_error, 'k', label='Velocity Error')
+axs[1, 1].plot(t_axis, 3*sigma_v_history, 'r--', label='3-Sigma Bound')
+axs[1, 1].plot(t_axis, -3*sigma_v_history, 'r--')
+axs[1, 1].set_title("Velocity Error [m/s]")
+axs[1, 1].legend()
+
+plt.tight_layout()
+plt.show()
