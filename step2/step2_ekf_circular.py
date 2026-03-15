@@ -125,3 +125,37 @@ plt.axis('equal')
 plt.grid(True, alpha=0.3)
 plt.legend()
 plt.show()
+
+# ===============================
+# Commit D: Circular trajectory reconstruction
+# ===============================
+
+# Convert angular state to Cartesian coordinates
+x_true = R_circ * np.cos(x_cache[:, 0])
+y_true = R_circ * np.sin(x_cache[:, 0])
+
+x_est = R_circ * np.cos(x_mu_cache[:, 0])
+y_est = R_circ * np.sin(x_mu_cache[:, 0])
+
+# Example beacon locations (for visualisation)
+beacons = np.array([
+    [0, 50],
+    [50, 0],
+    [-30, -50]
+])
+
+plt.figure(figsize=(6,6))
+
+plt.plot(x_true, y_true, 'b-', label='Actual trajectory')
+plt.plot(x_est, y_est, 'r--', label='Estimated trajectory')
+
+plt.scatter(beacons[:,0], beacons[:,1], marker='x', s=100, label='Beacons')
+
+plt.xlabel('x [m]')
+plt.ylabel('y [m]')
+plt.title('Circular trajectory tracking with EKF')
+plt.axis('equal')
+plt.legend()
+plt.grid(True)
+
+plt.show()
