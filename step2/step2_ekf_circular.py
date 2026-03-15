@@ -12,6 +12,14 @@ A = np.array([[1, h], [0, 1]])
 G = np.array([[0], [1]])
 C = np.array([[1, 0]])
 
+# Circular track radius
+R_circ = 50.0
+
+def circle_position(theta):
+    px = R_circ * np.cos(theta)
+    py = R_circ * np.sin(theta)
+    return px, py
+
 # Initial estimate: [angle, speed]
 x0_tilde = np.array([[0], [10]])
 P0 = np.array([[100, 0], [0, 1]])
@@ -53,6 +61,13 @@ t_axis = np.arange(n_sim) * h
 
 sigma_theta = np.sqrt(sigma_mu_cache[:, 0, 0])  # angle std
 sigma_v = np.sqrt(sigma_mu_cache[:, 1, 1])      # speed std
+
+# Convert angular state to Cartesian position on the circle
+pos_x = np.zeros(n_sim)
+pos_y = np.zeros(n_sim)
+
+for k in range(n_sim):
+    pos_x[k], pos_y[k] = circle_position(x_cache[k, 0])
 
 # Plot configuration using subplots
 fig, axs = plt.subplots(4, 1, figsize=(8, 12))
@@ -98,4 +113,15 @@ axs[3].legend()
 axs[3].grid(True, alpha=0.3)
 
 plt.tight_layout()
+plt.show()
+
+# Simple circular trajectory plot from angular state
+plt.figure(figsize=(6, 6))
+plt.plot(pos_x, pos_y, 'b-', label='Trajectory interpreted on circular track')
+plt.xlabel('$x$ [m]')
+plt.ylabel('$y$ [m]')
+plt.title('Circular geometry from angular state')
+plt.axis('equal')
+plt.grid(True, alpha=0.3)
+plt.legend()
 plt.show()
