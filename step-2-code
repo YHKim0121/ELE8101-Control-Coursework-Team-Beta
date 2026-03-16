@@ -22,3 +22,38 @@ G = np.array([[0],
 # Initial guesses: Position = 0, Velocity = 10 m/s
 x0_tilde = np.array([[0], [10.0]]) 
 P0 = np.array([[100, 0], [0, 1]])
+
+# --- 2. EKF FUNCTIONS ---
+def time_update(sigma_mu, x_mu):
+    x_tu = A @ x_mu
+    sigma_tu = A @ sigma_mu @ A.T + Q_val * (G @ G.T)
+    return sigma_tu, x_tu
+
+def measurement_update_ekf(sigma_tu, x_tu, y_meas, beacon):
+    """The EKF Correction using the Jacobian (The Straightener)"""
+    s = x_tu[0, 0] # Current estimated distance along the track
+    
+    # 1. Translate track distance to X, Y coordinates
+    px = R_track * np.cos(s / R_track)
+    py = R_track * np.sin(s / R_track)
+    
+    # 2. Predict the distance to this specific beacon
+    dx = px - beacon[0]
+    dy = py - beacon[1]
+    dist_pred = np.sqrt(dx**2 + dy**2)
+    
+    # 3. Calculate the Jacobian (H matrix)
+    ds_dx = -np.sin(s / R_track)
+    ds_dy = np.cos(s / R_track)
+    H1 = (dx * ds_dx + dy * ds_dy) / dist_pred
+    H = np.array([[H1, 0.0]])
+    
+    # 4. Standard Kalman Update Math
+    z = H @ sigma_tu @ H.T + R_var
+    K = sigma_tu @ H.T @ np.linalg.inv(z)
+    
+    # Update state and uncertainty
+    x_mu = x_tu + K @ (y_meas - dist_pred) 
+    sigma_mu = sigma_tu - K @ H @ sigma_tu
+    
+    return sigma_mu, x_mu
