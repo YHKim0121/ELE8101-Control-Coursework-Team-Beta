@@ -102,3 +102,44 @@ for t in range(n_sim):
     sigma_tu, x_tu = time_update(sigma_mu, x_mu)
 
 t_axis = np.arange(n_sim) * h
+
+
+# --- 4. THE PLOTS ---
+# Plot 1: The Track Map
+plt.figure(figsize=(7, 6))
+plt.plot(true_xy[:, 0], true_xy[:, 1], 'g-', label='True Circular Path', linewidth=2)
+plt.plot(est_xy[:, 0], est_xy[:, 1], 'b--', label='EKF Estimated Path')
+plt.scatter(beacons[:,0], beacons[:,1], c='red', marker='^', s=150, label='Beacons')
+plt.title("Track Map with Triangle Beacon Strategy")
+plt.xlabel("X Position [m]")
+plt.ylabel("Y Position [m]")
+plt.legend()
+plt.axis('equal')
+plt.grid(True)
+plt.show()
+
+# Plot 2: Error Analysis (Using your subplot style)
+fig, axs = plt.subplots(2, 1, figsize=(8, 6))
+
+# Position error 
+axs[0].plot(t_axis, x_cache[:, 0] - x_mu_cache[:, 0], 'g-', label='Position error')
+axs[0].plot(t_axis,  3*sigma_p_cache, 'r--', label=r'$\pm 3\sigma$')
+axs[0].plot(t_axis, -3*sigma_p_cache, 'r--')
+axs[0].axhline(0, color='k', linewidth=0.5)
+axs[0].set_xlabel('Time, $t$ [s]')
+axs[0].set_ylabel('Position error [m]')
+axs[0].legend()
+axs[0].grid(True, alpha=0.3)
+
+# Velocity error 
+axs[1].plot(t_axis, x_cache[:, 1] - x_mu_cache[:, 1], 'g-', label='Velocity error')
+axs[1].plot(t_axis,  3*sigma_v_cache, 'r--', label=r'$\pm 3\sigma$')
+axs[1].plot(t_axis, -3*sigma_v_cache, 'r--')
+axs[1].axhline(0, color='k', linewidth=0.5)
+axs[1].set_xlabel('Time, $t$ [s]')
+axs[1].set_ylabel('Velocity error [m/s]')
+axs[1].legend()
+axs[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
