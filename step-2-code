@@ -57,3 +57,48 @@ def measurement_update_ekf(sigma_tu, x_tu, y_meas, beacon):
     sigma_mu = sigma_tu - K @ H @ sigma_tu
     
     return sigma_mu, x_mu
+
+# --- 3. RUNNING THE SIMULATION ---
+n_sim = 5000
+x_true = x0_tilde.copy()
+sigma_tu, x_tu = P0, x0_tilde.copy()
+
+# Storage arrays
+x_cache = np.zeros((n_sim, 2))
+x_mu_cache = np.zeros((n_sim, 2))
+sigma_p_cache = np.zeros(n_sim)
+sigma_v_cache = np.zeros(n_sim)
+true_xy = np.zeros((n_sim, 2))
+est_xy = np.zeros((n_sim, 2))
+
+for t in range(n_sim):
+    # A. Reality: Car moves
+    w = np.random.normal(0, np.sqrt(Q_val))
+    x_true = A @ x_true + G * w
+    x_cache[t, :] = x_true.T
+    
+    # Save true X, Y for the map
+    true_xy[t, 0] = R_track * np.cos(x_true[0,0] / R_track)
+    true_xy[t, 1] = R_track * np.sin(x_true[0,0] / R_track)
+    
+    # B. Correction Phase (Process all 3 beacons)
+    sigma_mu, x_mu = sigma_tu, x_tu # Start with our prediction
+    for b in beacons:
+        # Generate noisy sensor reading
+        true_dist = np.sqrt((true_xy[t, 0] - b[0])**2 + (true_xy[t, 1] - b[1])**2)
+        y_meas = np.array([[true_dist + np.random.normal(0, np.sqrt(R_var))]])
+        
+        # Apply EKF update
+        sigma_mu, x_mu = measurement_update_ekf(sigma_mu, x_mu, y_meas, b)
+        
+    # Save estimates
+    x_mu_cache[t, :] = x_mu.T
+    sigma_p_cache[t] = np.sqrt(sigma_mu[0, 0])
+    sigma_v_cache[t] = np.sqrt(sigma_mu[1, 1])
+    est_xy[t, 0] = R_track * np.cos(x_mu[0,0] / R_track)
+    est_xy[t, 1] = R_track * np.sin(x_mu[0,0] / R_track)
+    
+    # C. Prediction Phase for next step
+    sigma_tu, x_tu = time_update(sigma_mu, x_mu)
+
+t_axis = np.arange(n_sim) * h
