@@ -123,7 +123,7 @@ def main():
 
     # Simulation settings
     dt = 0.01
-    T = 5.0
+    T = 50
     n_steps = int(T / dt)
 
     # True initial state
