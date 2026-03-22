@@ -5,33 +5,30 @@ import matplotlib.pyplot as plt
 np.random.seed(0)
 
 # ============================================================
-# Step 3: Add proper longitudinal + lateral dynamics
+# Step 3: Full 4-state simulation loop
 # x = [p, v, e, ve]
 # ============================================================
 
-# Time step
 h = 0.01
+R_meas = 1.5**2
 
-# Noise
+# Process noise
 Q_long = 0.01
 Q_lat = 0.05
 Qw = np.diag([Q_long, Q_lat])
 
-R_meas = 1.5**2
-
 # Road
 R_center = 48.0
 
-# Speed control
+# Dynamics tuning
 v_ref = 10.0
 k_v = 0.05
 
-# Lateral dynamics
 a_lat = 0.995
 k_lat = 0.02
 
 # ============================================================
-# State model (IMPORTANT CHANGE)
+# System matrices
 # ============================================================
 
 A = np.array([
@@ -48,7 +45,6 @@ b = np.array([
     [0.0]
 ])
 
-# Noise enters v and ve
 G = np.array([
     [0.0, 0.0],
     [1.0, 0.0],
@@ -70,7 +66,7 @@ ny = len(beacons)
 R_mat = R_meas * np.eye(ny)
 
 # ============================================================
-# Initial state
+# Initial conditions
 # ============================================================
 
 x0_tilde = np.array([
@@ -83,7 +79,7 @@ x0_tilde = np.array([
 P0 = np.diag([1.0, 1.0, 0.5, 0.1])
 
 # ============================================================
-# Measurement model (same as before)
+# Measurement model
 # ============================================================
 
 nx = 4
@@ -145,6 +141,7 @@ x_true = np.random.multivariate_normal(
 x_pred = x0_tilde.copy()
 P_pred = P0.copy()
 
+# Storage (IMPORTANT CHANGE)
 x_true_hist = np.zeros((n_sim, nx))
 x_est_hist = np.zeros((n_sim - 1, nx))
 P_hist = np.zeros((n_sim - 1, nx, nx))
@@ -156,6 +153,7 @@ x_true_hist[0, :] = x_true.flatten()
 # ============================================================
 
 for t in range(n_sim - 1):
+
     # Measurement
     noise = np.random.normal(0, np.sqrt(R_meas), ny)
     y = np.array(h_func(x_true, noise)).astype(float).flatten()
@@ -179,18 +177,37 @@ for t in range(n_sim - 1):
     x_true_hist[t + 1, :] = x_true.flatten()
 
 # ============================================================
-# Plot lateral motion (IMPORTANT for Step 3)
+# RMSE
+# ============================================================
+
+p_rmse  = np.sqrt(np.mean((x_true_hist[1:, 0] - x_est_hist[:, 0])**2))
+v_rmse  = np.sqrt(np.mean((x_true_hist[1:, 1] - x_est_hist[:, 1])**2))
+e_rmse  = np.sqrt(np.mean((x_true_hist[1:, 2] - x_est_hist[:, 2])**2))
+ve_rmse = np.sqrt(np.mean((x_true_hist[1:, 3] - x_est_hist[:, 3])**2))
+
+print("RMSE:")
+print(f"p  = {p_rmse:.3f}")
+print(f"v  = {v_rmse:.3f}")
+print(f"e  = {e_rmse:.3f}")
+print(f"ve = {ve_rmse:.3f}")
+
+# ============================================================
+# Plots
 # ============================================================
 
 t_axis = np.arange(n_sim) * h
 
-plt.figure(figsize=(10, 4))
-plt.plot(t_axis, x_true_hist[:, 2], label='True e')
-plt.plot(t_axis[:-1], x_est_hist[:, 2], '--', label='Estimated e')
-plt.xlabel('Time [s]')
-plt.ylabel('Lateral offset e [m]')
-plt.title('Step 3: Lateral motion introduced')
-plt.grid(True)
-plt.legend()
+fig, axs = plt.subplots(4, 1, figsize=(10, 12), sharex=True)
+
+labels = ['p', 'v', 'e', 've']
+
+for i in range(4):
+    axs[i].plot(t_axis, x_true_hist[:, i], label=f'True {labels[i]}')
+    axs[i].plot(t_axis[:-1], x_est_hist[:, i], '--', label=f'Est {labels[i]}')
+    axs[i].legend()
+    axs[i].grid(True)
+
+axs[-1].set_xlabel('Time [s]')
+plt.tight_layout()
 
 plt.show()
