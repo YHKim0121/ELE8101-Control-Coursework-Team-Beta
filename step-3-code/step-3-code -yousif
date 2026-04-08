@@ -1,0 +1,177 @@
+import numpy as np
+import casadi as cs
+import matplotlib.pyplot as plt
+
+np.random.seed(0)
+
+# ============================================================
+# 1. PROBLEM PARAMETERS (The Physics & Geometry)
+# ============================================================
+h = 0.01                 # 100 Hz frequency (Computer heartbeat)
+R_meas = 1.5**2          # Sensor noise variance
+Q_val = 0.01             # Process noise (Engine wobble)
+
+# DECISION: Using the 48m centerline for a safe 2m cushion on each side!
+R_center = 48.0          
+
+# DECISION: State is [arc_length (m), linear_speed (m/s)]
+A = np.array([[1.0, h], 
+              [0.0, 1.0]])
+G = np.array([[0.0], 
+              [1.0]])
+
+# Beacon Placement (Triangle Strategy)
+beacons = np.array([
+    [0.0, -100.0],      
+    [100.0, 100.0],    
+    [-100.0, 100.0]    
+])
+ny = len(beacons)
+R_mat = R_meas * np.eye(ny)
+
+# DECISION: P0 kept small (1.0). We are starting with calm confidence!
+x0_tilde = np.array([[0.0], [10.0]]) 
+P0 = np.diag([1.0, 1.0])
+# ============================================================
+# 2.  SETUP (The Automatic Math Brain)
+# ============================================================
+# We define our state using CasADi symbols so it can do the calculus.
+x_sym = cs.SX.sym('x', 2)
+p_sym = x_sym[0] # Arc length (meters traveled)
+
+# Turn meters traveled into an angle for the map, using the safe 48m radius
+theta = p_sym / R_center
+pos_x = R_center * cs.cos(theta)
+pos_y = R_center * cs.sin(theta)
+
+# Calculate distance to all 3 beacons at once
+h_list = []
+for bx, by in beacons:
+    dist = cs.sqrt((pos_x - bx)**2 + (pos_y - by)**2)
+    h_list.append(dist)
+
+# Stack them into a single column (Batch Processing!)
+h_sym = cs.vertcat(*h_list)
+
+# Tell CasADi to automatically calculate the Jacobian (H matrix)
+jhx = cs.Function('jhx', [x_sym], [cs.jacobian(h_sym, x_sym)])
+h_func = cs.Function('h_func', [x_sym], [h_sym])
+
+# ============================================================
+# 3. EKF FUNCTIONS 
+# ============================================================
+def measurement_update_batch(P_pred, x_pred, y):
+    """
+    DECISION: Batch Update. We process all 3 beacons simultaneously.
+    This calculates a single, highly accurate 3x2 Jacobian matrix.
+    """
+    # 1. Get the Jacobian and Predicted Distances from CasADi
+    H = np.array(jhx(x_pred)).astype(float)
+    y_pred = np.array(h_func(x_pred)).astype(float).flatten()
+    
+    # 2. Kalman Math (Notice S is now a 3x3 matrix)
+    S = H @ P_pred @ H.T + R_mat
+    K = P_pred @ H.T @ np.linalg.inv(S)
+    
+    # 3. Update State & Covariance
+    innovation = y - y_pred
+    x_upd = x_pred + K @ innovation.reshape(-1, 1)
+    P_upd = (np.eye(2) - K @ H) @ P_pred
+    
+    # DECISION: Notice there is NO np.clip here! We trust the Gaussian math.
+    return P_upd, x_upd
+
+def time_update(P_upd, x_upd):
+    """Predicts where the car will be in the next millisecond."""
+    x_pred = A @ x_upd
+    P_pred = A @ P_upd @ A.T + Q_val * (G @ G.T)
+    return P_pred, x_pred
+# ============================================================
+# 4. SIMULATION LOOP
+# ============================================================
+n_sim = 2000
+x_true = x0_tilde.copy()
+x_pred = x0_tilde.copy()
+P_pred = P0.copy()
+
+x_true_hist = np.zeros((n_sim, 2))
+x_est_hist = np.zeros((n_sim, 2))
+sigma_hist = np.zeros((n_sim, 2))
+
+for t in range(n_sim):
+    # A. The True Car Moves
+    w = np.random.normal(0, np.sqrt(Q_val))
+    x_true = A @ x_true + G * w
+    x_true_hist[t, :] = x_true.flatten()
+    
+    # B. Generate 3 noisy beacon readings at once
+    true_distances = np.array(h_func(x_true)).flatten()
+    meas_noise = np.random.normal(0, np.sqrt(R_meas), ny)
+    y_batch = true_distances + meas_noise
+    
+    # C. EKF Batch Update
+    P_upd, x_upd = measurement_update_batch(P_pred, x_pred, y_batch)
+    
+    # Save the estimates and uncertainties
+    x_est_hist[t, :] = x_upd.flatten()
+    sigma_hist[t, 0] = np.sqrt(P_upd[0, 0]) # Arc length uncertainty
+    sigma_hist[t, 1] = np.sqrt(P_upd[1, 1]) # Speed uncertainty
+    
+    # D. EKF Time Update for next loop
+    P_pred, x_pred = time_update(P_upd, x_upd)
+
+# ============================================================
+# 5. VISUALIZATION 
+# ============================================================
+t_axis = np.arange(n_sim) * h
+
+# Plot 1: Speed and Errors
+fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+
+# Speed Tracking
+axs[0].plot(t_axis, x_true_hist[:, 1], 'b-', label='True Speed (m/s)')
+axs[0].plot(t_axis, x_est_hist[:, 1], 'r-', label='EKF Speed Estimate')
+axs[0].fill_between(t_axis, x_est_hist[:, 1] - 3*sigma_hist[:, 1], 
+                    x_est_hist[:, 1] + 3*sigma_hist[:, 1], color='red', alpha=0.2, label=r'$\pm 3\sigma$')
+axs[0].set_title("Natural Speed Estimation (No Clipping)")
+axs[0].set_ylabel("Speed [m/s]")
+axs[0].legend()
+axs[0].grid(True)
+
+# Distance Error
+axs[1].plot(t_axis, x_true_hist[:, 0] - x_est_hist[:, 0], 'g-', label='Distance Error (m)')
+axs[1].plot(t_axis, 3*sigma_hist[:, 0], 'r--', label=r'$\pm 3\sigma$')
+axs[1].plot(t_axis, -3*sigma_hist[:, 0], 'r--')
+axs[1].set_title("Arc Length Estimation Error")
+axs[1].set_xlabel("Time [s]")
+axs[1].set_ylabel("Error [m]")
+axs[1].legend()
+axs[1].grid(True)
+plt.tight_layout()
+plt.show()
+
+# Plot 2: Map proving the car is on the 48m centerline
+plt.figure(figsize=(8, 8))
+theta_est = x_est_hist[:, 0] / R_center
+x_map = R_center * np.cos(theta_est)
+y_map = R_center * np.sin(theta_est)
+
+plt.plot(x_map, y_map, 'r--', label='EKF Trajectory')
+plt.scatter(beacons[:, 0], beacons[:, 1], c='k', marker='^', s=100, label='Beacons')
+
+# Drawing the physical road boundaries!
+circle_inner = plt.Circle((0, 0), 46.0, color='gray', fill=False, linestyle='-', linewidth=2)
+circle_outer = plt.Circle((0, 0), 50.0, color='gray', fill=False, linestyle='-', linewidth=2)
+circle_center = plt.Circle((0, 0), 48.0, color='green', fill=False, linestyle=':', label='48m Centerline')
+
+plt.gca().add_patch(circle_inner)
+plt.gca().add_patch(circle_outer)
+plt.gca().add_patch(circle_center)
+
+plt.title("2D Map: Safely Tracking the 48m Centerline")
+plt.xlabel("X [m]")
+plt.ylabel("Y [m]")
+plt.legend()
+plt.axis('equal')
+plt.grid(True)
+plt.show()
