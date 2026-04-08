@@ -57,3 +57,32 @@ h_sym = cs.vertcat(*h_list)
 jhx = cs.Function('jhx', [x_sym], [cs.jacobian(h_sym, x_sym)])
 h_func = cs.Function('h_func', [x_sym], [h_sym])
 
+# ============================================================
+# 3. EKF FUNCTIONS 
+# ============================================================
+def measurement_update_batch(P_pred, x_pred, y):
+    """
+    DECISION: Batch Update. We process all 3 beacons simultaneously.
+    This calculates a single, highly accurate 3x2 Jacobian matrix.
+    """
+    # 1. Get the Jacobian and Predicted Distances from CasADi
+    H = np.array(jhx(x_pred)).astype(float)
+    y_pred = np.array(h_func(x_pred)).astype(float).flatten()
+    
+    # 2. Kalman Math (Notice S is now a 3x3 matrix)
+    S = H @ P_pred @ H.T + R_mat
+    K = P_pred @ H.T @ np.linalg.inv(S)
+    
+    # 3. Update State & Covariance
+    innovation = y - y_pred
+    x_upd = x_pred + K @ innovation.reshape(-1, 1)
+    P_upd = (np.eye(2) - K @ H) @ P_pred
+    
+    # DECISION: Notice there is NO np.clip here! We trust the Gaussian math.
+    return P_upd, x_upd
+
+def time_update(P_upd, x_upd):
+    """Predicts where the car will be in the next millisecond."""
+    x_pred = A @ x_upd
+    P_pred = A @ P_upd @ A.T + Q_val * (G @ G.T)
+    return P_pred, x_pred
