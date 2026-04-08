@@ -1,0 +1,34 @@
+import numpy as np
+import casadi as cs
+import matplotlib.pyplot as plt
+
+np.random.seed(0)
+
+# ============================================================
+# 1. PROBLEM PARAMETERS (The Physics & Geometry)
+# ============================================================
+h = 0.01                 # 100 Hz frequency (Computer heartbeat)
+R_meas = 1.5**2          # Sensor noise variance
+Q_val = 0.01             # Process noise (Engine wobble)
+
+# DECISION: Using the 48m centerline for a safe 2m cushion on each side!
+R_center = 48.0          
+
+# DECISION: State is [arc_length (m), linear_speed (m/s)]
+A = np.array([[1.0, h], 
+              [0.0, 1.0]])
+G = np.array([[0.0], 
+              [1.0]])
+
+# Beacon Placement (Triangle Strategy)
+beacons = np.array([
+    [0.0, -100.0],      
+    [100.0, 100.0],    
+    [-100.0, 100.0]    
+])
+ny = len(beacons)
+R_mat = R_meas * np.eye(ny)
+
+# DECISION: P0 kept small (1.0). We are starting with calm confidence!
+x0_tilde = np.array([[0.0], [10.0]]) 
+P0 = np.diag([1.0, 1.0])
