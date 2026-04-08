@@ -32,3 +32,28 @@ R_mat = R_meas * np.eye(ny)
 # DECISION: P0 kept small (1.0). We are starting with calm confidence!
 x0_tilde = np.array([[0.0], [10.0]]) 
 P0 = np.diag([1.0, 1.0])
+# ============================================================
+# 2.  SETUP (The Automatic Math Brain)
+# ============================================================
+# We define our state using CasADi symbols so it can do the calculus.
+x_sym = cs.SX.sym('x', 2)
+p_sym = x_sym[0] # Arc length (meters traveled)
+
+# Turn meters traveled into an angle for the map, using the safe 48m radius
+theta = p_sym / R_center
+pos_x = R_center * cs.cos(theta)
+pos_y = R_center * cs.sin(theta)
+
+# Calculate distance to all 3 beacons at once
+h_list = []
+for bx, by in beacons:
+    dist = cs.sqrt((pos_x - bx)**2 + (pos_y - by)**2)
+    h_list.append(dist)
+
+# Stack them into a single column (Batch Processing!)
+h_sym = cs.vertcat(*h_list)
+
+# Tell CasADi to automatically calculate the Jacobian (H matrix)
+jhx = cs.Function('jhx', [x_sym], [cs.jacobian(h_sym, x_sym)])
+h_func = cs.Function('h_func', [x_sym], [h_sym])
+
