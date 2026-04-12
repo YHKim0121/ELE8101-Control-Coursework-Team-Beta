@@ -462,3 +462,115 @@ print(f"Beacon bias RMSE b3           : {b3_rmse:.4f} m")
 print(f"Overall bias RMSE             : {bias_total_rmse:.4f} m")
 print(f"Boundary violations           : {boundary_violations} / {n_sim}")
 print(f"Mean EKF runtime / sample     : {1e3 * avg_runtime:.4f} ms")
+
+# ============================================================
+# PLOT 1: Lateral offset with uncertainty
+# ============================================================
+
+sigma_d = np.sqrt(P_hist[:, 2, 2])
+
+plt.figure(figsize=(10, 4))
+plt.plot(t_axis, x_true_hist[:, 2], 'b-', label='Actual lateral offset')
+plt.plot(t_axis[:-1], x_est_hist[:, 2], 'r--', label='Estimated lateral offset')
+plt.fill_between(
+    t_axis[:-1],
+    x_est_hist[:, 2] - 3.0 * sigma_d,
+    x_est_hist[:, 2] + 3.0 * sigma_d,
+    color='red', alpha=0.2, label='±3σ'
+)
+plt.axhline(lane_half_width, color='k', linestyle='--', label='Lane bounds')
+plt.axhline(-lane_half_width, color='k', linestyle='--')
+plt.xlabel('Time [s]')
+plt.ylabel('Lateral offset [m]')
+plt.title('Lateral Offset Tracking')
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# PLOT 2: Exact track trajectory
+# ============================================================
+
+s_grid = np.linspace(0.0, track_length, 1800)
+centre_pts = np.array([track_pose_centerline_num(sv)[0] for sv in s_grid])
+outer_pts = np.array([boundary_point_num(sv, "outer") for sv in s_grid])
+inner_pts = np.array([boundary_point_num(sv, "inner") for sv in s_grid])
+
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.plot(outer_pts[:, 0], outer_pts[:, 1], 'k-', linewidth=2.2, label='Outer boundary')
+ax.plot(inner_pts[:, 0], inner_pts[:, 1], 'k-', linewidth=2.2, label='Inner boundary')
+ax.plot(centre_pts[:, 0], centre_pts[:, 1], color='gray', linestyle='--', alpha=0.9, label='Centreline')
+
+ax.plot(pos_true[:, 0], pos_true[:, 1], color='blue', linewidth=2.0, label='Actual trajectory')
+ax.plot(pos_est[:, 0], pos_est[:, 1], color='red', linestyle='--', linewidth=1.6, label='Estimated trajectory')
+
+ax.scatter(beacons[:, 0], beacons[:, 1], c='red', s=70, marker='o', label='Beacons')
+for i, name in enumerate(beacon_names):
+    ax.text(
+        beacons[i, 0] + 2.5,
+        beacons[i, 1] + 2.5,
+        name,
+        color='red',
+        fontsize=11,
+        fontweight='bold'
+    )
+
+ax.set_aspect('equal')
+ax.set_xlabel('X [m]')
+ax.set_ylabel('Y [m]')
+ax.set_title('Exact Figure 1 Track and Estimated Trajectory')
+ax.grid(True, alpha=0.3)
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# PLOT 3: Sensor Bias Convergence
+# ============================================================
+
+plt.figure(figsize=(10, 5))
+plt.plot(t_axis[:-1], bias_est_hist[:, 0], 'r-', label='Estimated b1')
+plt.plot(t_axis[:-1], bias_est_hist[:, 1], 'g-', label='Estimated b2')
+plt.plot(t_axis[:-1], bias_est_hist[:, 2], 'b-', label='Estimated b3')
+
+plt.axhline(true_biases[0, 0], color='r', linestyle='--', alpha=0.8, label='True b1')
+plt.axhline(true_biases[1, 0], color='g', linestyle='--', alpha=0.8, label='True b2')
+plt.axhline(true_biases[2, 0], color='b', linestyle='--', alpha=0.8, label='True b3')
+
+plt.xlabel('Time [s]')
+plt.ylabel('Bias estimate [m]')
+plt.title('Sensor Bias Convergence (Augmented State 5-7)')
+plt.grid(True, alpha=0.3)
+plt.legend(ncol=2)
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# PLOT 4: Bias Estimation Errors
+# ============================================================
+
+plt.figure(figsize=(10, 4))
+plt.plot(t_axis[:-1], bias_err[:, 0], label='b1 error')
+plt.plot(t_axis[:-1], bias_err[:, 1], label='b2 error')
+plt.plot(t_axis[:-1], bias_err[:, 2], label='b3 error')
+plt.xlabel('Time [s]')
+plt.ylabel('Bias estimation error [m]')
+plt.title('Beacon Bias Estimation Errors')
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# PLOT 5: Wrapped along-track error
+# ============================================================
+
+plt.figure(figsize=(10, 3.5))
+plt.plot(t_axis[:-1], s_err, color='purple')
+plt.xlabel('Time [s]')
+plt.ylabel('Along-track error [m]')
+plt.title('Wrapped Along-Track Error')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
