@@ -69,3 +69,39 @@ def unit(v):
 t_top = unit(P_RU - P_LU)
 t_bottom = unit(P_LD - P_RD)
 
+
+# ------------------------------------------------------------
+# 2) Beacon placement: wide right-angle triangle, well outside track
+# Right angle at b1
+# ------------------------------------------------------------
+b1_pos = np.array([-35.0, -55.0])
+b2_pos = np.array([-35.0,  75.0])
+b3_pos = np.array([155.0, -55.0])
+
+beacons = np.array([b1_pos, b2_pos, b3_pos])
+beacon_names = ['b1', 'b2', 'b3']
+ny = len(beacons)
+
+# ------------------------------------------------------------
+# 3) Noise covariances
+# ------------------------------------------------------------
+# Measurement noise from coursework: std = 1.5 m
+R_meas = 1.5**2
+R_mat = R_meas * np.eye(ny)
+
+# Process noise
+sigma_vs = 0.05
+sigma_vd = 0.015
+
+# small random-walk noise on bias states
+sigma_b = 0.002
+
+Qw = np.diag([
+    sigma_vs**2,   # w_vs
+    sigma_vd**2,   # w_vd
+    sigma_b**2,    # w_b1
+    sigma_b**2,    # w_b2
+    sigma_b**2     # w_b3
+])
+
+# ------------------------------------------------------------
