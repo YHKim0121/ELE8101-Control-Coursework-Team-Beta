@@ -105,3 +105,191 @@ Qw = np.diag([
 ])
 
 # ------------------------------------------------------------
+
+# 4) True constant sensor biases (for convergence study)
+# ------------------------------------------------------------
+true_biases = np.array([[0.9], [-0.7], [0.5]])
+
+# ============================================================
+# NUMERIC HELPERS
+# ============================================================
+
+def wrap_s_num(s):
+    return float(np.mod(s, track_length))
+
+def wrap_s_diff(ds):
+    return (ds + 0.5 * track_length) % track_length - 0.5 * track_length
+
+def track_pose_centerline_num(s):
+    """
+    Exact centreline, clockwise direction:
+      1) top tangent:    P_LU -> P_RU
+      2) right arc:      upper -> lower
+      3) bottom tangent: P_RD -> P_LD
+      4) left arc:       lower -> upper
+    """
+    s = wrap_s_num(s)
+
+    if s < L_top:
+        tau = s / L_top
+        p_c = (1.0 - tau) * P_LU + tau * P_RU
+        psi = np.arctan2(t_top[1], t_top[0])
+        return p_c, psi
+
+    s -= L_top
+
+    if s < L_right:
+        theta = phi - s / R_c_right
+        p_c = B_centre + np.array([R_c_right * np.cos(theta),
+                                   R_c_right * np.sin(theta)])
+        t = np.array([np.sin(theta), -np.cos(theta)])
+        psi = np.arctan2(t[1], t[0])
+        return p_c, psi
+
+    s -= L_right
+
+    if s < L_bottom:
+        tau = s / L_bottom
+        p_c = (1.0 - tau) * P_RD + tau * P_LD
+        psi = np.arctan2(t_bottom[1], t_bottom[0])
+        return p_c, psi
+
+    s -= L_bottom
+
+    theta = -phi - s / R_c_left
+    p_c = A_centre + np.array([R_c_left * np.cos(theta),
+                               R_c_left * np.sin(theta)])
+    t = np.array([np.sin(theta), -np.cos(theta)])
+    psi = np.arctan2(t[1], t[0])
+    return p_c, psi
+
+def global_position_num(x):
+    p_c, psi = track_pose_centerline_num(float(x[0, 0]))
+    n_left = np.array([-np.sin(psi), np.cos(psi)])
+    return p_c + float(x[2, 0]) * n_left
+
+def boundary_point_num(s, side="outer"):
+    p_c, psi = track_pose_centerline_num(s)
+    n_left = np.array([-np.sin(psi), np.cos(psi)])
+    if side == "outer":
+        return p_c + lane_half_width * n_left
+    elif side == "inner":
+        return p_c - lane_half_width * n_left
+    else:
+        raise ValueError("side must be 'outer' or 'inner'")
+
+# ============================================================
+# CASADI MODEL
+# ============================================================
+
+def wrap_s_sym(s):
+    return s - track_length * cs.floor(s / track_length)
+
+def track_pose_centerline_sym(s):
+    """
+    CasADi version of the exact piecewise centreline.
+    """
+    s = wrap_s_sym(s)
+
+    # ---- top tangent
+    p_top = cs.vertcat(
+        P_LU[0] + (P_RU[0] - P_LU[0]) * (s / L_top),
+        P_LU[1] + (P_RU[1] - P_LU[1]) * (s / L_top)
+    )
+    psi_top = float(np.arctan2(t_top[1], t_top[0]))
+
+    # ---- right arc
+    s2 = s - L_top
+    theta_r = phi - s2 / R_c_right
+    p_right = cs.vertcat(
+        B_centre[0] + R_c_right * cs.cos(theta_r),
+        B_centre[1] + R_c_right * cs.sin(theta_r)
+    )
+    t_r = cs.vertcat(cs.sin(theta_r), -cs.cos(theta_r))
+    psi_right = cs.atan2(t_r[1], t_r[0])
+
+    # ---- bottom tangent
+    s3 = s - L_top - L_right
+    p_bottom = cs.vertcat(
+        P_RD[0] + (P_LD[0] - P_RD[0]) * (s3 / L_bottom),
+        P_RD[1] + (P_LD[1] - P_RD[1]) * (s3 / L_bottom)
+    )
+    psi_bottom = float(np.arctan2(t_bottom[1], t_bottom[0]))
+
+    # ---- left arc
+    s4 = s - L_top - L_right - L_bottom
+    theta_l = -phi - s4 / R_c_left
+    p_left = cs.vertcat(
+        A_centre[0] + R_c_left * cs.cos(theta_l),
+        A_centre[1] + R_c_left * cs.sin(theta_l)
+    )
+    t_l = cs.vertcat(cs.sin(theta_l), -cs.cos(theta_l))
+    psi_left = cs.atan2(t_l[1], t_l[0])
+
+    cond1 = s < L_top
+    cond2 = s < (L_top + L_right)
+    cond3 = s < (L_top + L_right + L_bottom)
+
+    p_c = cs.if_else(cond1, p_top,
+          cs.if_else(cond2, p_right,
+          cs.if_else(cond3, p_bottom, p_left)))
+
+    psi = cs.if_else(cond1, psi_top,
+          cs.if_else(cond2, psi_right,
+          cs.if_else(cond3, psi_bottom, psi_left)))
+
+    return p_c, psi
+
+# State and noise symbols
+nx = 7
+nw = 5
+
+x_sym = cs.MX.sym('x', nx)
+w_sym = cs.MX.sym('w', nw)
+
+s = x_sym[0]
+v_s = x_sym[1]
+d_lat = x_sym[2]
+v_d = x_sym[3]
+b1 = x_sym[4]
+b2 = x_sym[5]
+b3 = x_sym[6]
+
+# Longitudinal + lateral dynamics
+v_target = 10.0
+k_vel = 0.12
+k_restore = 0.22
+k_damp = 0.85
+
+s_next = wrap_s_sym(s + v_s * h)
+v_s_next = v_s + k_vel * (v_target - v_s) * h + w_sym[0]
+d_next = d_lat + v_d * h
+v_d_next = v_d - (k_damp * v_d + k_restore * d_lat) * h + w_sym[1]
+
+# Augmented sensor bias random walk
+b1_next = b1 + w_sym[2]
+b2_next = b2 + w_sym[3]
+b3_next = b3 + w_sym[4]
+
+x_next = cs.vertcat(
+    s_next, v_s_next, d_next, v_d_next,
+    b1_next, b2_next, b3_next
+)
+
+f_fun = cs.Function('f_fun', [x_sym, w_sym], [x_next])
+A_fun = cs.Function('A_fun', [x_sym, w_sym], [cs.jacobian(x_next, x_sym)])
+G_fun = cs.Function('G_fun', [x_sym, w_sym], [cs.jacobian(x_next, w_sym)])
+
+# Nonlinear measurement model
+p_c_sym, psi_sym = track_pose_centerline_sym(s)
+n_left_sym = cs.vertcat(-cs.sin(psi_sym), cs.cos(psi_sym))
+p_vehicle_sym = p_c_sym + d_lat * n_left_sym
+
+h1 = cs.sqrt((p_vehicle_sym[0] - beacons[0, 0])**2 + (p_vehicle_sym[1] - beacons[0, 1])**2) + b1
+h2 = cs.sqrt((p_vehicle_sym[0] - beacons[1, 0])**2 + (p_vehicle_sym[1] - beacons[1, 1])**2) + b2
+h3 = cs.sqrt((p_vehicle_sym[0] - beacons[2, 0])**2 + (p_vehicle_sym[1] - beacons[2, 1])**2) + b3
+
+h_sym = cs.vertcat(h1, h2, h3)
+
+h_fun = cs.Function('h_fun', [x_sym], [h_sym])
+C_fun = cs.Function('C_fun', [x_sym], [cs.jacobian(h_sym, x_sym)])
