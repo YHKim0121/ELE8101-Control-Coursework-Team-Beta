@@ -4,200 +4,259 @@ import matplotlib.pyplot as plt
 
 np.random.seed(0)
 
-# ============================================================
-# Step 3: 4-State EKF with Ornstein-Uhlenbeck (OU) Dynamics
-# ============================================================
-h = 0.01  # Sample time (100 Hz)
-R_c = 48.0
-lane_half_width = 2.0
 
-# Process and measurement noise
-Q_long = 0.01
-Q_lat = 0.001 
-Qw = np.diag([Q_long, Q_lat])
-R_meas = 1.5**2
+class EstimatorParams:
+    def __init__(self):
+        self.dt = 0.01
+        self.v_target = 10.0
+        self.k_vel = 0.1
+        self.k_damp = 0.9
+        self.k_restore = 0.05
 
-# OU process parameters (Restoring force for lane keeping)
-k_restore = 0.05
-k_damp = 0.9
-k_vel = 0.1
-v_target = 10.0
+        self.lane_half_width = 2.0
 
-# Initial state: x = [s, v_s, d, v_d]^T
-nx = 4
-x0_tilde = np.array([[0.0], [10.0], [0.0], [0.0]])
-P0 = np.diag([1.0, 1.0, 0.5, 0.1])
+        self.R_left = 48.0
+        self.R_right = 22.0
+        self.d_centers = 100.0
 
-# ============================================================
-# System Dynamics (CasADi)
-# ============================================================
-s = cs.MX.sym('s')
-v_s = cs.MX.sym('v_s')
-d = cs.MX.sym('d')
-v_d = cs.MX.sym('v_d')
-x_sym = cs.vertcat(s, v_s, d, v_d)
+        self.Q_long = 0.01
+        self.Q_lat = 0.001
+        self.Qw = np.diag([self.Q_long, self.Q_lat])
 
-w_vs = cs.MX.sym('w_vs')
-w_vd = cs.MX.sym('w_vd')
-w_sym = cs.vertcat(w_vs, w_vd)
+        self.R_meas = 1.5**2
+        self.beacons = np.array([
+            [0.0, -100.0],
+            [100.0, 100.0],
+            [-100.0, 100.0]
+        ])
 
-# Discrete-time state equations
-s_next = s + v_s * h
-v_s_next = v_s + k_vel * (v_target - v_s) * h + w_vs
-d_next = d + v_d * h
-v_d_next = v_d - (k_damp * v_d + k_restore * d) * h + w_vd
+        self.nx = 4
+        self.ny = self.beacons.shape[0]
 
-x_next = cs.vertcat(s_next, v_s_next, d_next, v_d_next)
+        self.R_mat = self.R_meas * np.eye(self.ny)
+        self.x0 = np.array([[0.0], [10.0], [0.0], [0.0]])
+        self.P0 = np.diag([1.0, 1.0, 0.5, 0.1])
 
-f_dynamics = cs.Function('f_dynamics', [x_sym, w_sym], [x_next])
-A_jac = cs.Function('A_jac', [x_sym, w_sym], [cs.jacobian(x_next, x_sym)])
-G_jac = cs.Function('G_jac', [x_sym, w_sym], [cs.jacobian(x_next, w_sym)])
 
-# ============================================================
-# Beacon Measurement Model
-# ============================================================
-beacons = np.array([[0, -100], [100, 100], [-100, 100]])
-ny = len(beacons)
-R_mat = R_meas * np.eye(ny)
+class TrackGeometry:
+    def __init__(self, params: EstimatorParams):
+        self.R1 = params.R_left
+        self.R2 = params.R_right
+        self.d = params.d_centers
 
-v_sym = cs.MX.sym('v', ny)
-theta_sym = x_sym[0] / R_c
-radius_sym = R_c + x_sym[2]
+        self.sin_alpha = (self.R1 - self.R2) / self.d
+        self.alpha = np.arcsin(self.sin_alpha)
 
-pos_x = radius_sym * cs.cos(theta_sym)
-pos_y = radius_sym * cs.sin(theta_sym)
+        self.L_str = self.d * np.cos(self.alpha)
+        self.L_curveB = self.R2 * (np.pi - 2.0 * self.alpha)
+        self.L_curveA = self.R1 * (np.pi + 2.0 * self.alpha)
+        self.L_total = 2.0 * self.L_str + self.L_curveB + self.L_curveA
 
-h_list = []
-for i in range(ny):
-    bx, by = beacons[i]
-    dist = cs.sqrt((pos_x - bx)**2 + (pos_y - by)**2)
-    h_list.append(dist + v_sym[i])
+        self.P_A_top_x = self.R1 * np.sin(self.alpha)
+        self.P_A_top_y = self.R1 * np.cos(self.alpha)
+        self.P_B_bot_x = self.d + self.R2 * np.sin(self.alpha)
+        self.P_B_bot_y = -self.R2 * np.cos(self.alpha)
 
-h_sym = cs.vertcat(*h_list)
-jhx = cs.Function('jhx', [x_sym, v_sym], [cs.jacobian(h_sym, x_sym)])
-h_func = cs.Function('h_func', [x_sym, v_sym], [h_sym])
+    def wrap_progress(self, s):
+        return np.mod(s, self.L_total)
 
-# ============================================================
-# EKF Functions
-# ============================================================
-def measurement_update(P_pred, x_pred, y):
-    C = np.array(jhx(x_pred, np.zeros(ny))).astype(float)
-    y_pred = np.array(h_func(x_pred, np.zeros(ny))).astype(float).flatten()
 
-    S = C @ P_pred @ C.T + R_mat
-    K = P_pred @ C.T @ np.linalg.inv(S)
+class ProcessModel:
+    def __init__(self, params: EstimatorParams):
+        self.p = params
 
-    innovation = y - y_pred
-    x_upd = x_pred + K @ innovation.reshape(-1, 1)
-    P_upd = (np.eye(nx) - K @ C) @ P_pred
+        s = cs.MX.sym('s')
+        v_s = cs.MX.sym('v_s')
+        e = cs.MX.sym('e')
+        v_e = cs.MX.sym('v_e')
+        x_sym = cs.vertcat(s, v_s, e, v_e)
 
-    # Enforce covariance symmetry to prevent numerical drift
-    P_upd = (P_upd + P_upd.T) / 2.0
+        w_vs = cs.MX.sym('w_vs')
+        w_ve = cs.MX.sym('w_ve')
+        w_sym = cs.vertcat(w_vs, w_ve)
 
-    # Note: EKF does NOT use hard clipping to preserve the Gaussian assumption
-    return P_upd, x_upd
+        s_next = s + v_s * self.p.dt
+        v_s_next = v_s + self.p.k_vel * (self.p.v_target - v_s) * self.p.dt + w_vs
+        e_next = e + v_e * self.p.dt
+        v_e_next = v_e - (self.p.k_damp * v_e + self.p.k_restore * e) * self.p.dt + w_ve
 
-def time_update(P_upd, x_upd):
-    w_zero = np.zeros((2, 1))
-    x_pred = np.array(f_dynamics(x_upd, w_zero))
+        x_next = cs.vertcat(s_next, v_s_next, e_next, v_e_next)
 
-    A_val = np.array(A_jac(x_upd, w_zero))
-    G_val = np.array(G_jac(x_upd, w_zero))
+        self.f_dynamics = cs.Function('f_dynamics', [x_sym, w_sym], [x_next])
+        self.A_jac = cs.Function('A_jac', [x_sym, w_sym], [cs.jacobian(x_next, x_sym)])
+        self.G_jac = cs.Function('G_jac', [x_sym, w_sym], [cs.jacobian(x_next, w_sym)])
 
-    P_pred = A_val @ P_upd @ A_val.T + G_val @ Qw @ G_val.T
-    return P_pred, x_pred
+    def propagate(self, x, w):
+        return np.array(self.f_dynamics(x, w)).astype(float)
 
-# ============================================================
-# Simulation Setup & Main Loop
-# ============================================================
-n_sim = 5000
-x_true = x0_tilde.copy()
-x_pred = x0_tilde.copy()
-P_pred = P0.copy()
+    def linearise(self, x, w):
+        A = np.array(self.A_jac(x, w)).astype(float)
+        G = np.array(self.G_jac(x, w)).astype(float)
+        return A, G
 
-x_true_hist = np.zeros((n_sim, nx))
-x_est_hist = np.zeros((n_sim - 1, nx))
-P_hist = np.zeros((n_sim - 1, nx, nx))
 
-x_true_hist[0, :] = x_true.flatten()
-boundary_violations = 0
+class CasadiMeasurementModel:
+    def __init__(self, params: EstimatorParams, track: TrackGeometry):
+        self.p = params
+        self.track = track
+        self.ny = params.beacons.shape[0]
 
-for t in range(n_sim - 1):
-    # 1. Generate true measurements
-    meas_noise = np.random.normal(0, np.sqrt(R_meas), ny)
-    y = np.array(h_func(x_true, meas_noise)).astype(float).flatten()
+        s_sym = cs.MX.sym("s")
+        vs_sym = cs.MX.sym("vs")
+        e_sym = cs.MX.sym("e")
+        ve_sym = cs.MX.sym("ve")
+        self.state_sym = cs.vertcat(s_sym, vs_sym, e_sym, ve_sym)
 
-    # 2. EKF measurement update
-    P_upd, x_upd = measurement_update(P_pred, x_pred, y)
+        s_mod = cs.fmod(s_sym, track.L_total)
 
-    x_est_hist[t, :] = x_upd.flatten()
-    P_hist[t] = P_upd
+        x1 = track.P_A_top_x + s_mod * cs.cos(-track.alpha)
+        y1 = track.P_A_top_y + s_mod * cs.sin(-track.alpha)
+        psi1 = -track.alpha
 
-    # 3. EKF time update
-    P_pred, x_pred = time_update(P_upd, x_upd)
+        s2 = s_mod - track.L_str
+        theta2 = (np.pi / 2.0 - track.alpha) - s2 / track.R2
+        x2 = track.d + track.R2 * cs.cos(theta2)
+        y2 = track.R2 * cs.sin(theta2)
+        psi2 = theta2 - np.pi / 2.0
 
-    # 4. Propagate true system
-    w_true = np.array([[np.random.normal(0, np.sqrt(Q_long))],
-                       [np.random.normal(0, np.sqrt(Q_lat))]])
-    x_true = np.array(f_dynamics(x_true, w_true))
+        s3 = s_mod - (track.L_str + track.L_curveB)
+        x3 = track.P_B_bot_x + s3 * cs.cos(-np.pi + track.alpha)
+        y3 = track.P_B_bot_y + s3 * cs.sin(-np.pi + track.alpha)
+        psi3 = -np.pi + track.alpha
 
-    # Track boundary violations
-    if abs(x_true[2, 0]) > lane_half_width:
-        boundary_violations += 1
+        s4 = s_mod - (2.0 * track.L_str + track.L_curveB)
+        theta4 = (-np.pi / 2.0 + track.alpha) - s4 / track.R1
+        x4 = track.R1 * cs.cos(theta4)
+        y4 = track.R1 * cs.sin(theta4)
+        psi4 = theta4 - np.pi / 2.0
 
-    x_true_hist[t + 1, :] = x_true.flatten()
+        x_c = cs.if_else(
+            s_mod < track.L_str, x1,
+            cs.if_else(
+                s_mod < track.L_str + track.L_curveB, x2,
+                cs.if_else(
+                    s_mod < 2.0 * track.L_str + track.L_curveB, x3, x4
+                )
+            )
+        )
 
-# ============================================================
-# Evaluation: RMSE & Metrics
-# ============================================================
-t_axis = np.arange(n_sim) * h
+        y_c = cs.if_else(
+            s_mod < track.L_str, y1,
+            cs.if_else(
+                s_mod < track.L_str + track.L_curveB, y2,
+                cs.if_else(
+                    s_mod < 2.0 * track.L_str + track.L_curveB, y3, y4
+                )
+            )
+        )
 
-p_rmse = np.sqrt(np.mean((x_true_hist[1:, 0] - x_est_hist[:, 0])**2))
-e_rmse = np.sqrt(np.mean((x_true_hist[1:, 2] - x_est_hist[:, 2])**2))
+        psi_c = cs.if_else(
+            s_mod < track.L_str, psi1,
+            cs.if_else(
+                s_mod < track.L_str + track.L_curveB, psi2,
+                cs.if_else(
+                    s_mod < 2.0 * track.L_str + track.L_curveB, psi3, psi4
+                )
+            )
+        )
 
-print("--- Step 3 EKF Performance ---")
-print(f"Longitudinal (s) RMSE : {p_rmse:.4f} m")
-print(f"Lateral (d) RMSE      : {e_rmse:.4f} m")
-print(f"Boundary Violations   : {boundary_violations} times out of {n_sim} steps")
+        X_global = x_c - e_sym * cs.sin(psi_c)
+        Y_global = y_c + e_sym * cs.cos(psi_c)
 
-# ============================================================
-# Visualization
-# ============================================================
-sigma_e = np.sqrt(P_hist[:, 2, 2])
+        h_list = []
+        for i in range(self.ny):
+            bx, by = params.beacons[i]
+            dist = cs.sqrt((X_global - bx)**2 + (Y_global - by)**2)
+            h_list.append(dist)
 
-plt.figure(figsize=(10, 4))
-plt.plot(t_axis, x_true_hist[:, 2], 'b-', label='Actual lateral offset')
-plt.plot(t_axis[:-1], x_est_hist[:, 2], 'r--', label='Estimated offset')
-plt.fill_between(t_axis[:-1], x_est_hist[:, 2] - 3*sigma_e, x_est_hist[:, 2] + 3*sigma_e, color='red', alpha=0.2, label='±3 sigma')
-plt.axhline(lane_half_width, color='k', linestyle='--', label='Lane bounds')
-plt.axhline(-lane_half_width, color='k', linestyle='--')
-plt.xlabel('Time [s]')
-plt.ylabel('Lateral offset [m]')
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.tight_layout()
-plt.show()
+        h_sym = cs.vertcat(*h_list)
 
-fig2, ax2 = plt.subplots(figsize=(8, 8))
-theta_true = x_true_hist[:, 0] / R_c
-x_2d_true = (R_c + x_true_hist[:, 2]) * np.cos(theta_true)
-y_2d_true = (R_c + x_true_hist[:, 2]) * np.sin(theta_true)
+        self.pos_func = cs.Function("pos_func", [s_sym, e_sym], [X_global, Y_global])
+        self.h_func = cs.Function("h_func", [self.state_sym], [h_sym])
+        self.H_func = cs.Function("H_func", [self.state_sym], [cs.jacobian(h_sym, self.state_sym)])
 
-theta_est = x_est_hist[:, 0] / R_c
-x_2d_est = (R_c + x_est_hist[:, 2]) * np.cos(theta_est)
-y_2d_est = (R_c + x_est_hist[:, 2]) * np.sin(theta_est)
+    def measurement(self, x):
+        return np.array(self.h_func(x)).astype(float).reshape(-1, 1)
 
-ax2.plot(x_2d_true, y_2d_true, color='blue', linewidth=2, label='Actual trajectory')
-ax2.plot(x_2d_est, y_2d_est, color='red', linestyle='--', linewidth=1.5, label='Estimated trajectory')
-ax2.scatter(beacons[:, 0], beacons[:, 1], c='k', marker='^', s=100, label='Beacons')
+    def jacobian(self, x):
+        return np.array(self.H_func(x)).astype(float)
 
-ax2.add_patch(plt.Circle((0, 0), R_c - lane_half_width, color='gray', fill=False, linestyle=':'))
-ax2.add_patch(plt.Circle((0, 0), R_c + lane_half_width, color='gray', fill=False, linestyle=':'))
-ax2.add_patch(plt.Circle((0, 0), R_c, color='gray', fill=False, linestyle='--', alpha=0.7))
+    def global_position(self, s, e):
+        X, Y = self.pos_func(float(s), float(e))
+        return float(X), float(Y)
 
-ax2.set_aspect('equal')
-ax2.set_xlabel('X [m]')
-ax2.set_ylabel('Y [m]')
-ax2.grid(True, alpha=0.3)
-ax2.legend()
-plt.show()
+
+class EKF:
+    def __init__(self, params: EstimatorParams, process_model: ProcessModel, meas_model: CasadiMeasurementModel):
+        self.p = params
+        self.fm = process_model
+        self.hm = meas_model
+
+    def measurement_update(self, P_pred, x_pred, z):
+        H = self.hm.jacobian(x_pred)
+        z_hat = self.hm.measurement(x_pred)
+
+        innovation = z - z_hat
+        S = H @ P_pred @ H.T + self.p.R_mat
+        K = P_pred @ H.T @ np.linalg.inv(S)
+
+        x_upd = x_pred + K @ innovation
+        P_upd = (np.eye(self.p.nx) - K @ H) @ P_pred
+        P_upd = 0.5 * (P_upd + P_upd.T)
+
+        return x_upd, P_upd
+
+    def time_update(self, P_upd, x_upd):
+        w_zero = np.zeros((2, 1))
+        x_pred = self.fm.propagate(x_upd, w_zero)
+        A, G = self.fm.linearise(x_upd, w_zero)
+        P_pred = A @ P_upd @ A.T + G @ self.p.Qw @ G.T
+        return x_pred, P_pred
+
+
+def run_simulation(n_sim=5000):
+    params = EstimatorParams()
+    track = TrackGeometry(params)
+    process_model = ProcessModel(params)
+    meas_model = CasadiMeasurementModel(params, track)
+    ekf = EKF(params, process_model, meas_model)
+
+    x_true = params.x0.copy()
+    x_pred = params.x0.copy()
+    P_pred = params.P0.copy()
+
+    x_true_hist = np.zeros((n_sim, params.nx))
+    x_est_hist = np.zeros((n_sim - 1, params.nx))
+    P_hist = np.zeros((n_sim - 1, params.nx, params.nx))
+
+    x_true_hist[0, :] = x_true.flatten()
+
+    for t in range(n_sim - 1):
+        z_true = meas_model.measurement(x_true)
+        z = z_true + np.random.normal(0, np.sqrt(params.R_meas), (params.ny, 1))
+
+        x_upd, P_upd = ekf.measurement_update(P_pred, x_pred, z)
+        x_est_hist[t, :] = x_upd.flatten()
+        P_hist[t] = P_upd
+
+        x_pred, P_pred = ekf.time_update(P_upd, x_upd)
+
+        w_true = np.array([
+            [np.random.normal(0, np.sqrt(params.Q_long))],
+            [np.random.normal(0, np.sqrt(params.Q_lat))]
+        ])
+        x_true = process_model.propagate(x_true, w_true)
+        x_true_hist[t + 1, :] = x_true.flatten()
+
+    return params, track, meas_model, x_true_hist, x_est_hist, P_hist
+
+
+if __name__ == "__main__":
+    params, track, meas_model, x_true_hist, x_est_hist, P_hist = run_simulation()
+
+    s_rmse = np.sqrt(np.mean((x_true_hist[1:, 0] - x_est_hist[:, 0])**2))
+    e_rmse = np.sqrt(np.mean((x_true_hist[1:, 2] - x_est_hist[:, 2])**2))
+
+    print("--- Step 3 on Coursework Track ---")
+    print(f"Longitudinal RMSE : {s_rmse:.4f} m")
+    print(f"Lateral RMSE      : {e_rmse:.4f} m")
