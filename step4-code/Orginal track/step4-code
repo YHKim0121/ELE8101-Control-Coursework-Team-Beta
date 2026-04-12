@@ -293,3 +293,172 @@ h_sym = cs.vertcat(h1, h2, h3)
 
 h_fun = cs.Function('h_fun', [x_sym], [h_sym])
 C_fun = cs.Function('C_fun', [x_sym], [cs.jacobian(h_sym, x_sym)])
+
+# ============================================================
+# EKF FUNCTIONS
+# ============================================================
+
+def measurement_update(P_pred, x_pred, y):
+    C = np.array(C_fun(x_pred)).astype(float)
+    y_pred = np.array(h_fun(x_pred)).astype(float).flatten()
+
+    S = C @ P_pred @ C.T + R_mat
+    K = P_pred @ C.T @ np.linalg.inv(S)
+
+    innovation = y - y_pred
+    x_upd = x_pred + K @ innovation.reshape(-1, 1)
+    x_upd[0, 0] = wrap_s_num(x_upd[0, 0])
+
+    P_upd = (np.eye(nx) - K @ C) @ P_pred
+    P_upd = 0.5 * (P_upd + P_upd.T)
+    return P_upd, x_upd
+
+def time_update(P_upd, x_upd):
+    w_zero = np.zeros((nw, 1))
+    x_pred = np.array(f_fun(x_upd, w_zero)).astype(float)
+
+    A_val = np.array(A_fun(x_upd, w_zero)).astype(float)
+    G_val = np.array(G_fun(x_upd, w_zero)).astype(float)
+
+    P_pred = A_val @ P_upd @ A_val.T + G_val @ Qw @ G_val.T
+    return P_pred, x_pred
+
+# ============================================================
+# INITIAL CONDITIONS
+# ============================================================
+
+# True state includes actual constant biases
+x_true = np.array([
+    [5.0],        # s
+    [10.0],       # v_s
+    [0.4],        # d_lat
+    [0.0],        # v_d
+    [true_biases[0, 0]],
+    [true_biases[1, 0]],
+    [true_biases[2, 0]]
+], dtype=float)
+
+# EKF initial estimate: no prior knowledge of the biases
+x_pred = np.array([
+    [7.0],
+    [9.5],
+    [0.1],
+    [0.0],
+    [0.0],
+    [0.0],
+    [0.0]
+], dtype=float)
+
+P0 = np.diag([
+    4.0,   # s
+    1.0,   # v_s
+    0.5,   # d_lat
+    0.08,  # v_d
+    1.5,   # b1
+    1.5,   # b2
+    1.5    # b3
+])
+
+P_pred = P0.copy()
+
+# ============================================================
+# MAIN SIMULATION
+# ============================================================
+
+n_sim = 7000
+
+x_true_hist = np.zeros((n_sim, nx))
+x_est_hist = np.zeros((n_sim - 1, nx))
+P_hist = np.zeros((n_sim - 1, nx, nx))
+
+x_true_hist[0, :] = x_true.flatten()
+boundary_violations = 0
+
+tic = time.perf_counter()
+
+for t in range(n_sim - 1):
+    # ---- true measurement with constant sensor bias
+    y_true = np.array(h_fun(x_true)).astype(float).flatten()
+    y = y_true + np.random.normal(0.0, np.sqrt(R_meas), ny)
+
+    # ---- EKF measurement update
+    P_upd, x_upd = measurement_update(P_pred, x_pred, y)
+
+    x_est_hist[t, :] = x_upd.flatten()
+    P_hist[t, :, :] = P_upd
+
+    # ---- EKF time update
+    P_pred, x_pred = time_update(P_upd, x_upd)
+
+    # ---- propagate true dynamics
+    # true bias states remain constant, so no bias process noise added
+    w_true = np.array([
+        [np.random.normal(0.0, sigma_vs)],
+        [np.random.normal(0.0, sigma_vd)],
+        [0.0],
+        [0.0],
+        [0.0]
+    ])
+    x_true = np.array(f_fun(x_true, w_true)).astype(float)
+    x_true[4:, 0] = true_biases.flatten()
+    x_true[0, 0] = wrap_s_num(x_true[0, 0])
+
+    if abs(x_true[2, 0]) > lane_half_width:
+        boundary_violations += 1
+
+    x_true_hist[t + 1, :] = x_true.flatten()
+
+avg_runtime = (time.perf_counter() - tic) / (n_sim - 1)
+
+# ============================================================
+# METRICS / RMSE
+# ============================================================
+
+t_axis = np.arange(n_sim) * h
+
+# Along-track RMSE
+s_err = np.array([
+    wrap_s_diff(x_true_hist[k + 1, 0] - x_est_hist[k, 0])
+    for k in range(n_sim - 1)
+])
+
+# Lateral RMSE
+d_err = x_true_hist[1:, 2] - x_est_hist[:, 2]
+
+# Cartesian position RMSE
+pos_true = np.zeros((n_sim - 1, 2))
+pos_est = np.zeros((n_sim - 1, 2))
+
+for k in range(n_sim - 1):
+    pos_true[k, :] = global_position_num(x_true_hist[k + 1, :].reshape(-1, 1))
+    pos_est[k, :] = global_position_num(x_est_hist[k, :].reshape(-1, 1))
+
+xy_err = pos_true - pos_est
+xy_norm_err = np.linalg.norm(xy_err, axis=1)
+
+# Bias RMSE
+bias_true_hist = x_true_hist[1:, 4:7]
+bias_est_hist = x_est_hist[:, 4:7]
+bias_err = bias_true_hist - bias_est_hist
+
+s_rmse = np.sqrt(np.mean(s_err**2))
+d_rmse = np.sqrt(np.mean(d_err**2))
+xy_rmse = np.sqrt(np.mean(xy_norm_err**2))
+
+b1_rmse = np.sqrt(np.mean(bias_err[:, 0]**2))
+b2_rmse = np.sqrt(np.mean(bias_err[:, 1]**2))
+b3_rmse = np.sqrt(np.mean(bias_err[:, 2]**2))
+bias_total_rmse = np.sqrt(np.mean(bias_err**2))
+
+print("\n--- Step 4 EKF with Augmented Sensor Bias (CasADi Jacobians) ---")
+print(f"Track length                  : {track_length:.4f} m")
+print(f"Centreline radii              : left = {R_c_left:.3f} m, right = {R_c_right:.3f} m")
+print(f"Along-track RMSE              : {s_rmse:.4f} m")
+print(f"Lateral offset RMSE           : {d_rmse:.4f} m")
+print(f"Cartesian position RMSE       : {xy_rmse:.4f} m")
+print(f"Beacon bias RMSE b1           : {b1_rmse:.4f} m")
+print(f"Beacon bias RMSE b2           : {b2_rmse:.4f} m")
+print(f"Beacon bias RMSE b3           : {b3_rmse:.4f} m")
+print(f"Overall bias RMSE             : {bias_total_rmse:.4f} m")
+print(f"Boundary violations           : {boundary_violations} / {n_sim}")
+print(f"Mean EKF runtime / sample     : {1e3 * avg_runtime:.4f} ms")
