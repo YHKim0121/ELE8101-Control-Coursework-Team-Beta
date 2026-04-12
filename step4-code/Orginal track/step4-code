@@ -1,0 +1,71 @@
+import numpy as np
+import casadi as cs
+import matplotlib.pyplot as plt
+import time
+
+np.random.seed(0)
+
+# ============================================================
+# Step 4: Exact Figure 1  orginal Track + EKF with Augmented Sensor Bias
+# State:
+#   x = [s, v_s, d_lat, v_d, b1, b2, b3]^T
+#
+#   s     : curvilinear position along exact centreline [m]
+#   v_s   : longitudinal speed [m/s]
+#   d_lat : lateral offset from centreline [m]
+#   v_d   : lateral speed [m/s]
+#   b_i   : additive bias of beacon i range measurement [m]
+#
+# Measurements:
+#   y_i = range_i(x) + b_i + noise_i
+# ============================================================
+
+# ------------------------------------------------------------
+# 1) geometry from Figure 1 (exact)
+# ------------------------------------------------------------
+h = 0.01               # 100 Hz
+R = 50.0               # left outer radius
+r = 46.0               # left inner radius
+rho = 20.0             # right outer radius
+d_centres = 100.0      # distance AB
+
+lane_width = R - r
+lane_half_width = lane_width / 2.0
+
+A_centre = np.array([0.0, 0.0])
+B_centre = np.array([d_centres, 0.0])
+
+# constant track width => right inner radius
+rho_inner = rho - lane_width
+
+# centreline radii
+R_c_left = 0.5 * (R + r)             # 48
+R_c_right = 0.5 * (rho + rho_inner)  # 18
+
+delta_R = R_c_left - R_c_right
+if abs(delta_R) >= d_centres:
+    raise ValueError("Invalid geometry: common external tangents do not exist.")
+
+phi = np.arccos(delta_R / d_centres)
+L_tan = np.sqrt(d_centres**2 - delta_R**2)
+
+# Tangency points on the CENTRELINE
+P_LU = A_centre + np.array([R_c_left * np.cos(phi),  R_c_left * np.sin(phi)])
+P_RU = B_centre + np.array([R_c_right * np.cos(phi), R_c_right * np.sin(phi)])
+
+P_LD = A_centre + np.array([R_c_left * np.cos(phi), -R_c_left * np.sin(phi)])
+P_RD = B_centre + np.array([R_c_right * np.cos(phi), -R_c_right * np.sin(phi)])
+
+L_top = L_tan
+L_right = 2.0 * phi * R_c_right
+L_bottom = L_tan
+L_left = (2.0 * np.pi - 2.0 * phi) * R_c_left
+
+track_length = L_top + L_right + L_bottom + L_left
+
+def unit(v):
+    return v / np.linalg.norm(v)
+
+t_top = unit(P_RU - P_LU)
+t_bottom = unit(P_LD - P_RD)
+
