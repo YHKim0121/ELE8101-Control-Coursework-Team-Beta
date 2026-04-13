@@ -1,0 +1,576 @@
+import numpy as np
+import casadi as cs
+import matplotlib.pyplot as plt
+import time
+
+np.random.seed(0)
+
+# ============================================================
+# Step 4: Exact Figure 1  orginal Track + EKF with Augmented Sensor Bias
+# State:
+#   x = [s, v_s, d_lat, v_d, b1, b2, b3]^T
+#
+#   s     : curvilinear position along exact centreline [m]
+#   v_s   : longitudinal speed [m/s]
+#   d_lat : lateral offset from centreline [m]
+#   v_d   : lateral speed [m/s]
+#   b_i   : additive bias of beacon i range measurement [m]
+#
+# Measurements:
+#   y_i = range_i(x) + b_i + noise_i
+# ============================================================
+
+# ------------------------------------------------------------
+# 1) geometry from Figure 1 (exact)
+# ------------------------------------------------------------
+h = 0.01               # 100 Hz
+R = 50.0               # left outer radius
+r = 46.0               # left inner radius
+rho = 20.0             # right outer radius
+d_centres = 100.0      # distance AB
+
+lane_width = R - r
+lane_half_width = lane_width / 2.0
+
+A_centre = np.array([0.0, 0.0])
+B_centre = np.array([d_centres, 0.0])
+
+# constant track width => right inner radius
+rho_inner = rho - lane_width
+
+# centreline radii
+R_c_left = 0.5 * (R + r)             # 48
+R_c_right = 0.5 * (rho + rho_inner)  # 18
+
+delta_R = R_c_left - R_c_right
+if abs(delta_R) >= d_centres:
+    raise ValueError("Invalid geometry: common external tangents do not exist.")
+
+phi = np.arccos(delta_R / d_centres)
+L_tan = np.sqrt(d_centres**2 - delta_R**2)
+
+# Tangency points on the CENTRELINE
+P_LU = A_centre + np.array([R_c_left * np.cos(phi),  R_c_left * np.sin(phi)])
+P_RU = B_centre + np.array([R_c_right * np.cos(phi), R_c_right * np.sin(phi)])
+
+P_LD = A_centre + np.array([R_c_left * np.cos(phi), -R_c_left * np.sin(phi)])
+P_RD = B_centre + np.array([R_c_right * np.cos(phi), -R_c_right * np.sin(phi)])
+
+L_top = L_tan
+L_right = 2.0 * phi * R_c_right
+L_bottom = L_tan
+L_left = (2.0 * np.pi - 2.0 * phi) * R_c_left
+
+track_length = L_top + L_right + L_bottom + L_left
+
+def unit(v):
+    return v / np.linalg.norm(v)
+
+t_top = unit(P_RU - P_LU)
+t_bottom = unit(P_LD - P_RD)
+
+
+# ------------------------------------------------------------
+# 2) Beacon placement: wide right-angle triangle, well outside track
+# Right angle at b1
+# ------------------------------------------------------------
+b1_pos = np.array([-35.0, -55.0])
+b2_pos = np.array([-35.0,  75.0])
+b3_pos = np.array([155.0, -55.0])
+
+beacons = np.array([b1_pos, b2_pos, b3_pos])
+beacon_names = ['b1', 'b2', 'b3']
+ny = len(beacons)
+
+# ------------------------------------------------------------
+# 3) Noise covariances
+# ------------------------------------------------------------
+# Measurement noise from coursework: std = 1.5 m
+R_meas = 1.5**2
+R_mat = R_meas * np.eye(ny)
+
+# Process noise
+sigma_vs = 0.05
+sigma_vd = 0.015
+
+# small random-walk noise on bias states
+sigma_b = 0.002
+
+Qw = np.diag([
+    sigma_vs**2,   # w_vs
+    sigma_vd**2,   # w_vd
+    sigma_b**2,    # w_b1
+    sigma_b**2,    # w_b2
+    sigma_b**2     # w_b3
+])
+
+# ------------------------------------------------------------
+
+# 4) True constant sensor biases (for convergence study)
+# ------------------------------------------------------------
+true_biases = np.array([[0.9], [-0.7], [0.5]])
+
+# ============================================================
+# NUMERIC HELPERS
+# ============================================================
+
+def wrap_s_num(s):
+    return float(np.mod(s, track_length))
+
+def wrap_s_diff(ds):
+    return (ds + 0.5 * track_length) % track_length - 0.5 * track_length
+
+def track_pose_centerline_num(s):
+    """
+    Exact centreline, clockwise direction:
+      1) top tangent:    P_LU -> P_RU
+      2) right arc:      upper -> lower
+      3) bottom tangent: P_RD -> P_LD
+      4) left arc:       lower -> upper
+    """
+    s = wrap_s_num(s)
+
+    if s < L_top:
+        tau = s / L_top
+        p_c = (1.0 - tau) * P_LU + tau * P_RU
+        psi = np.arctan2(t_top[1], t_top[0])
+        return p_c, psi
+
+    s -= L_top
+
+    if s < L_right:
+        theta = phi - s / R_c_right
+        p_c = B_centre + np.array([R_c_right * np.cos(theta),
+                                   R_c_right * np.sin(theta)])
+        t = np.array([np.sin(theta), -np.cos(theta)])
+        psi = np.arctan2(t[1], t[0])
+        return p_c, psi
+
+    s -= L_right
+
+    if s < L_bottom:
+        tau = s / L_bottom
+        p_c = (1.0 - tau) * P_RD + tau * P_LD
+        psi = np.arctan2(t_bottom[1], t_bottom[0])
+        return p_c, psi
+
+    s -= L_bottom
+
+    theta = -phi - s / R_c_left
+    p_c = A_centre + np.array([R_c_left * np.cos(theta),
+                               R_c_left * np.sin(theta)])
+    t = np.array([np.sin(theta), -np.cos(theta)])
+    psi = np.arctan2(t[1], t[0])
+    return p_c, psi
+
+def global_position_num(x):
+    p_c, psi = track_pose_centerline_num(float(x[0, 0]))
+    n_left = np.array([-np.sin(psi), np.cos(psi)])
+    return p_c + float(x[2, 0]) * n_left
+
+def boundary_point_num(s, side="outer"):
+    p_c, psi = track_pose_centerline_num(s)
+    n_left = np.array([-np.sin(psi), np.cos(psi)])
+    if side == "outer":
+        return p_c + lane_half_width * n_left
+    elif side == "inner":
+        return p_c - lane_half_width * n_left
+    else:
+        raise ValueError("side must be 'outer' or 'inner'")
+
+# ============================================================
+# CASADI MODEL
+# ============================================================
+
+def wrap_s_sym(s):
+    return s - track_length * cs.floor(s / track_length)
+
+def track_pose_centerline_sym(s):
+    """
+    CasADi version of the exact piecewise centreline.
+    """
+    s = wrap_s_sym(s)
+
+    # ---- top tangent
+    p_top = cs.vertcat(
+        P_LU[0] + (P_RU[0] - P_LU[0]) * (s / L_top),
+        P_LU[1] + (P_RU[1] - P_LU[1]) * (s / L_top)
+    )
+    psi_top = float(np.arctan2(t_top[1], t_top[0]))
+
+    # ---- right arc
+    s2 = s - L_top
+    theta_r = phi - s2 / R_c_right
+    p_right = cs.vertcat(
+        B_centre[0] + R_c_right * cs.cos(theta_r),
+        B_centre[1] + R_c_right * cs.sin(theta_r)
+    )
+    t_r = cs.vertcat(cs.sin(theta_r), -cs.cos(theta_r))
+    psi_right = cs.atan2(t_r[1], t_r[0])
+
+    # ---- bottom tangent
+    s3 = s - L_top - L_right
+    p_bottom = cs.vertcat(
+        P_RD[0] + (P_LD[0] - P_RD[0]) * (s3 / L_bottom),
+        P_RD[1] + (P_LD[1] - P_RD[1]) * (s3 / L_bottom)
+    )
+    psi_bottom = float(np.arctan2(t_bottom[1], t_bottom[0]))
+
+    # ---- left arc
+    s4 = s - L_top - L_right - L_bottom
+    theta_l = -phi - s4 / R_c_left
+    p_left = cs.vertcat(
+        A_centre[0] + R_c_left * cs.cos(theta_l),
+        A_centre[1] + R_c_left * cs.sin(theta_l)
+    )
+    t_l = cs.vertcat(cs.sin(theta_l), -cs.cos(theta_l))
+    psi_left = cs.atan2(t_l[1], t_l[0])
+
+    cond1 = s < L_top
+    cond2 = s < (L_top + L_right)
+    cond3 = s < (L_top + L_right + L_bottom)
+
+    p_c = cs.if_else(cond1, p_top,
+          cs.if_else(cond2, p_right,
+          cs.if_else(cond3, p_bottom, p_left)))
+
+    psi = cs.if_else(cond1, psi_top,
+          cs.if_else(cond2, psi_right,
+          cs.if_else(cond3, psi_bottom, psi_left)))
+
+    return p_c, psi
+
+# State and noise symbols
+nx = 7
+nw = 5
+
+x_sym = cs.MX.sym('x', nx)
+w_sym = cs.MX.sym('w', nw)
+
+s = x_sym[0]
+v_s = x_sym[1]
+d_lat = x_sym[2]
+v_d = x_sym[3]
+b1 = x_sym[4]
+b2 = x_sym[5]
+b3 = x_sym[6]
+
+# Longitudinal + lateral dynamics
+v_target = 10.0
+k_vel = 0.12
+k_restore = 0.22
+k_damp = 0.85
+
+s_next = wrap_s_sym(s + v_s * h)
+v_s_next = v_s + k_vel * (v_target - v_s) * h + w_sym[0]
+d_next = d_lat + v_d * h
+v_d_next = v_d - (k_damp * v_d + k_restore * d_lat) * h + w_sym[1]
+
+# Augmented sensor bias random walk
+b1_next = b1 + w_sym[2]
+b2_next = b2 + w_sym[3]
+b3_next = b3 + w_sym[4]
+
+x_next = cs.vertcat(
+    s_next, v_s_next, d_next, v_d_next,
+    b1_next, b2_next, b3_next
+)
+
+f_fun = cs.Function('f_fun', [x_sym, w_sym], [x_next])
+A_fun = cs.Function('A_fun', [x_sym, w_sym], [cs.jacobian(x_next, x_sym)])
+G_fun = cs.Function('G_fun', [x_sym, w_sym], [cs.jacobian(x_next, w_sym)])
+
+# Nonlinear measurement model
+p_c_sym, psi_sym = track_pose_centerline_sym(s)
+n_left_sym = cs.vertcat(-cs.sin(psi_sym), cs.cos(psi_sym))
+p_vehicle_sym = p_c_sym + d_lat * n_left_sym
+
+h1 = cs.sqrt((p_vehicle_sym[0] - beacons[0, 0])**2 + (p_vehicle_sym[1] - beacons[0, 1])**2) + b1
+h2 = cs.sqrt((p_vehicle_sym[0] - beacons[1, 0])**2 + (p_vehicle_sym[1] - beacons[1, 1])**2) + b2
+h3 = cs.sqrt((p_vehicle_sym[0] - beacons[2, 0])**2 + (p_vehicle_sym[1] - beacons[2, 1])**2) + b3
+
+h_sym = cs.vertcat(h1, h2, h3)
+
+h_fun = cs.Function('h_fun', [x_sym], [h_sym])
+C_fun = cs.Function('C_fun', [x_sym], [cs.jacobian(h_sym, x_sym)])
+
+# ============================================================
+# EKF FUNCTIONS
+# ============================================================
+
+def measurement_update(P_pred, x_pred, y):
+    C = np.array(C_fun(x_pred)).astype(float)
+    y_pred = np.array(h_fun(x_pred)).astype(float).flatten()
+
+    S = C @ P_pred @ C.T + R_mat
+    K = P_pred @ C.T @ np.linalg.inv(S)
+
+    innovation = y - y_pred
+    x_upd = x_pred + K @ innovation.reshape(-1, 1)
+    x_upd[0, 0] = wrap_s_num(x_upd[0, 0])
+
+    P_upd = (np.eye(nx) - K @ C) @ P_pred
+    P_upd = 0.5 * (P_upd + P_upd.T)
+    return P_upd, x_upd
+
+def time_update(P_upd, x_upd):
+    w_zero = np.zeros((nw, 1))
+    x_pred = np.array(f_fun(x_upd, w_zero)).astype(float)
+
+    A_val = np.array(A_fun(x_upd, w_zero)).astype(float)
+    G_val = np.array(G_fun(x_upd, w_zero)).astype(float)
+
+    P_pred = A_val @ P_upd @ A_val.T + G_val @ Qw @ G_val.T
+    return P_pred, x_pred
+
+# ============================================================
+# INITIAL CONDITIONS
+# ============================================================
+
+# True state includes actual constant biases
+x_true = np.array([
+    [5.0],        # s
+    [10.0],       # v_s
+    [0.4],        # d_lat
+    [0.0],        # v_d
+    [true_biases[0, 0]],
+    [true_biases[1, 0]],
+    [true_biases[2, 0]]
+], dtype=float)
+
+# EKF initial estimate: no prior knowledge of the biases
+x_pred = np.array([
+    [7.0],
+    [9.5],
+    [0.1],
+    [0.0],
+    [0.0],
+    [0.0],
+    [0.0]
+], dtype=float)
+
+P0 = np.diag([
+    4.0,   # s
+    1.0,   # v_s
+    0.5,   # d_lat
+    0.08,  # v_d
+    1.5,   # b1
+    1.5,   # b2
+    1.5    # b3
+])
+
+P_pred = P0.copy()
+
+# ============================================================
+# MAIN SIMULATION
+# ============================================================
+
+n_sim = 7000
+
+x_true_hist = np.zeros((n_sim, nx))
+x_est_hist = np.zeros((n_sim - 1, nx))
+P_hist = np.zeros((n_sim - 1, nx, nx))
+
+x_true_hist[0, :] = x_true.flatten()
+boundary_violations = 0
+
+tic = time.perf_counter()
+
+for t in range(n_sim - 1):
+    # ---- true measurement with constant sensor bias
+    y_true = np.array(h_fun(x_true)).astype(float).flatten()
+    y = y_true + np.random.normal(0.0, np.sqrt(R_meas), ny)
+
+    # ---- EKF measurement update
+    P_upd, x_upd = measurement_update(P_pred, x_pred, y)
+
+    x_est_hist[t, :] = x_upd.flatten()
+    P_hist[t, :, :] = P_upd
+
+    # ---- EKF time update
+    P_pred, x_pred = time_update(P_upd, x_upd)
+
+    # ---- propagate true dynamics
+    # true bias states remain constant, so no bias process noise added
+    w_true = np.array([
+        [np.random.normal(0.0, sigma_vs)],
+        [np.random.normal(0.0, sigma_vd)],
+        [0.0],
+        [0.0],
+        [0.0]
+    ])
+    x_true = np.array(f_fun(x_true, w_true)).astype(float)
+    x_true[4:, 0] = true_biases.flatten()
+    x_true[0, 0] = wrap_s_num(x_true[0, 0])
+
+    if abs(x_true[2, 0]) > lane_half_width:
+        boundary_violations += 1
+
+    x_true_hist[t + 1, :] = x_true.flatten()
+
+avg_runtime = (time.perf_counter() - tic) / (n_sim - 1)
+
+# ============================================================
+# METRICS / RMSE
+# ============================================================
+
+t_axis = np.arange(n_sim) * h
+
+# Along-track RMSE
+s_err = np.array([
+    wrap_s_diff(x_true_hist[k + 1, 0] - x_est_hist[k, 0])
+    for k in range(n_sim - 1)
+])
+
+# Lateral RMSE
+d_err = x_true_hist[1:, 2] - x_est_hist[:, 2]
+
+# Cartesian position RMSE
+pos_true = np.zeros((n_sim - 1, 2))
+pos_est = np.zeros((n_sim - 1, 2))
+
+for k in range(n_sim - 1):
+    pos_true[k, :] = global_position_num(x_true_hist[k + 1, :].reshape(-1, 1))
+    pos_est[k, :] = global_position_num(x_est_hist[k, :].reshape(-1, 1))
+
+xy_err = pos_true - pos_est
+xy_norm_err = np.linalg.norm(xy_err, axis=1)
+
+# Bias RMSE
+bias_true_hist = x_true_hist[1:, 4:7]
+bias_est_hist = x_est_hist[:, 4:7]
+bias_err = bias_true_hist - bias_est_hist
+
+s_rmse = np.sqrt(np.mean(s_err**2))
+d_rmse = np.sqrt(np.mean(d_err**2))
+xy_rmse = np.sqrt(np.mean(xy_norm_err**2))
+
+b1_rmse = np.sqrt(np.mean(bias_err[:, 0]**2))
+b2_rmse = np.sqrt(np.mean(bias_err[:, 1]**2))
+b3_rmse = np.sqrt(np.mean(bias_err[:, 2]**2))
+bias_total_rmse = np.sqrt(np.mean(bias_err**2))
+
+print("\n--- Step 4 EKF with Augmented Sensor Bias (CasADi Jacobians) ---")
+print(f"Track length                  : {track_length:.4f} m")
+print(f"Centreline radii              : left = {R_c_left:.3f} m, right = {R_c_right:.3f} m")
+print(f"Along-track RMSE              : {s_rmse:.4f} m")
+print(f"Lateral offset RMSE           : {d_rmse:.4f} m")
+print(f"Cartesian position RMSE       : {xy_rmse:.4f} m")
+print(f"Beacon bias RMSE b1           : {b1_rmse:.4f} m")
+print(f"Beacon bias RMSE b2           : {b2_rmse:.4f} m")
+print(f"Beacon bias RMSE b3           : {b3_rmse:.4f} m")
+print(f"Overall bias RMSE             : {bias_total_rmse:.4f} m")
+print(f"Boundary violations           : {boundary_violations} / {n_sim}")
+print(f"Mean EKF runtime / sample     : {1e3 * avg_runtime:.4f} ms")
+
+# ============================================================
+# PLOT 1: Lateral offset with uncertainty
+# ============================================================
+
+sigma_d = np.sqrt(P_hist[:, 2, 2])
+
+plt.figure(figsize=(10, 4))
+plt.plot(t_axis, x_true_hist[:, 2], 'b-', label='Actual lateral offset')
+plt.plot(t_axis[:-1], x_est_hist[:, 2], 'r--', label='Estimated lateral offset')
+plt.fill_between(
+    t_axis[:-1],
+    x_est_hist[:, 2] - 3.0 * sigma_d,
+    x_est_hist[:, 2] + 3.0 * sigma_d,
+    color='red', alpha=0.2, label='±3σ'
+)
+plt.axhline(lane_half_width, color='k', linestyle='--', label='Lane bounds')
+plt.axhline(-lane_half_width, color='k', linestyle='--')
+plt.xlabel('Time [s]')
+plt.ylabel('Lateral offset [m]')
+plt.title('Lateral Offset Tracking')
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# PLOT 2: Exact track trajectory
+# ============================================================
+
+s_grid = np.linspace(0.0, track_length, 1800)
+centre_pts = np.array([track_pose_centerline_num(sv)[0] for sv in s_grid])
+outer_pts = np.array([boundary_point_num(sv, "outer") for sv in s_grid])
+inner_pts = np.array([boundary_point_num(sv, "inner") for sv in s_grid])
+
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.plot(outer_pts[:, 0], outer_pts[:, 1], 'k-', linewidth=2.2, label='Outer boundary')
+ax.plot(inner_pts[:, 0], inner_pts[:, 1], 'k-', linewidth=2.2, label='Inner boundary')
+ax.plot(centre_pts[:, 0], centre_pts[:, 1], color='gray', linestyle='--', alpha=0.9, label='Centreline')
+
+ax.plot(pos_true[:, 0], pos_true[:, 1], color='blue', linewidth=2.0, label='Actual trajectory')
+ax.plot(pos_est[:, 0], pos_est[:, 1], color='red', linestyle='--', linewidth=1.6, label='Estimated trajectory')
+
+ax.scatter(beacons[:, 0], beacons[:, 1], c='red', s=70, marker='o', label='Beacons')
+for i, name in enumerate(beacon_names):
+    ax.text(
+        beacons[i, 0] + 2.5,
+        beacons[i, 1] + 2.5,
+        name,
+        color='red',
+        fontsize=11,
+        fontweight='bold'
+    )
+
+ax.set_aspect('equal')
+ax.set_xlabel('X [m]')
+ax.set_ylabel('Y [m]')
+ax.set_title('Exact Figure 1 Track and Estimated Trajectory')
+ax.grid(True, alpha=0.3)
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# PLOT 3: Sensor Bias Convergence
+# ============================================================
+
+plt.figure(figsize=(10, 5))
+plt.plot(t_axis[:-1], bias_est_hist[:, 0], 'r-', label='Estimated b1')
+plt.plot(t_axis[:-1], bias_est_hist[:, 1], 'g-', label='Estimated b2')
+plt.plot(t_axis[:-1], bias_est_hist[:, 2], 'b-', label='Estimated b3')
+
+plt.axhline(true_biases[0, 0], color='r', linestyle='--', alpha=0.8, label='True b1')
+plt.axhline(true_biases[1, 0], color='g', linestyle='--', alpha=0.8, label='True b2')
+plt.axhline(true_biases[2, 0], color='b', linestyle='--', alpha=0.8, label='True b3')
+
+plt.xlabel('Time [s]')
+plt.ylabel('Bias estimate [m]')
+plt.title('Sensor Bias Convergence (Augmented State 5-7)')
+plt.grid(True, alpha=0.3)
+plt.legend(ncol=2)
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# PLOT 4: Bias Estimation Errors
+# ============================================================
+
+plt.figure(figsize=(10, 4))
+plt.plot(t_axis[:-1], bias_err[:, 0], label='b1 error')
+plt.plot(t_axis[:-1], bias_err[:, 1], label='b2 error')
+plt.plot(t_axis[:-1], bias_err[:, 2], label='b3 error')
+plt.xlabel('Time [s]')
+plt.ylabel('Bias estimation error [m]')
+plt.title('Beacon Bias Estimation Errors')
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# PLOT 5: Wrapped along-track error
+# ============================================================
+
+plt.figure(figsize=(10, 3.5))
+plt.plot(t_axis[:-1], s_err, color='purple')
+plt.xlabel('Time [s]')
+plt.ylabel('Along-track error [m]')
+plt.title('Wrapped Along-Track Error')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
