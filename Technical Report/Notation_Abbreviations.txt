@@ -1,0 +1,64 @@
+================================================================
+ABBREVIATIONS
+================================================================
+
+EKF: Extended Kalman Filter
+KF: Kalman Filter
+MSD: Mass-Spring-Damper
+GPS: Global Positioning System
+RMSE: Root Mean Square Error
+OU: Ornstein-Uhlenbeck process
+NIS: Normalised Innovation Squared
+CasADi: Algorithmic differentiation library used for Jacobian computation
+
+================================================================
+STATE VECTOR  x = [s, v_s, e, v_e, z, v_z, b]^T
+================================================================
+
+s: Longitudinal progress along track centreline (m)
+v_s: Longitudinal velocity (m/s)
+e: Lateral offset from centreline (m)
+v_e: Lateral velocity (m/s), bounded within +/- 0.55 m/s
+z: Vertical displacement — suspension bounce (m)
+v_z: Vertical velocity (m/s)
+b: Beacon 1 sensor bias, augmented state (m), true value = 1.5 m
+
+================================================================
+EKF NOTATION
+================================================================
+
+f(x): Nonlinear process model
+h(x): Measurement model — Euclidean distance to each beacon
+A_t: Jacobian of f(x), 7x7
+C_t: Jacobian of h(x), 4x7
+K_t: Kalman Gain, 7x4
+Q: Process noise covariance, 7x7 diagonal
+    Non-zero entries on v_s, v_e, v_z, b
+R: Measurement noise covariance, 1.5^2 * I(4x4)
+P: Error covariance matrix, 7x7
+   P_0 initialised large to force early measurement trust
+y_t: Observation vector — 4 beacon distance readings
+w_t: Process noise vector (full, 7x1)
+w_e: Lateral process noise (scalar)
+w_z: Vertical process noise (scalar)
+dt: Sampling time = 0.01 s (100 Hz)
+
+================================================================
+MSD COEFFICIENTS
+================================================================
+
+k_r: Lateral restoring coefficient = 0.5
+k_d: Lateral damping coefficient   = 1.0
+k_r_z: Vertical restoring coefficient (same structure as k_r)
+k_d_z: Vertical damping coefficient  (same structure as k_d)
+
+================================================================
+BEACON POSITIONS (metres)
+================================================================
+
+B1: X = -60,  Y =  65  — bias augmented into state vector
+B2: X = -60,  Y = -65
+B3: X =  130, Y =  65
+B4: X =  130, Y = -65
+
+Bounding rectangle: 190 m x 130 m
