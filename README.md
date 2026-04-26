@@ -5,12 +5,14 @@ Team: Yonghyeon Kim (40489830), Ming Foong Lau (40348411), Yousif Mustafa Elnaim
 
 
 **What this is?**
+
 A 7-state Extended Kalman Filter for vehicle localisation on a piecewise racetrack, built using Python and CasADi. The estimator tracks longitudinal progress, lateral offset, and vertical suspension dynamics simultaneously, while compensating for a systematic sensor bias in real time.
 
 We followed the four-step incremental approach from the coursework spec — each member independently prototyped their own version at each step, then the team reviewed and merged the best ideas into a single final implementation.
 
 
 **Repo layout**
+
 Step1_Brainstorm_Code/ — individual Step 1 prototypes
 Step1_Final_Code/ — Step1_CW_Final_Code.ipynb (1D linear Kalman filter)
 
@@ -27,6 +29,7 @@ Technical Report/ — final PDF submission
 
 
 **Setup**
+
 Python 3.10+ required.
 
 git clone https://github.com/YHKim0121/ELE8101-Control-Coursework-Team-Beta.git
@@ -35,6 +38,7 @@ pip install -r requirements.txt
 
 
 **How to Run**
+
 Final code (Steps 1–4) — all final implementations are Jupyter notebooks. Launch Jupyter and open the relevant notebook:
 
 jupyter notebook
@@ -60,6 +64,7 @@ Final bias error: ~0.003 m
 
 
 **Notes**
+
 Random seed is fixed (np.random.seed(42) in Step 4) so results are reproducible
 
 CasADi handles all Jacobian computation, so no manual Jacobian derivation is needed in the final code
@@ -70,4 +75,5 @@ Bias augmentation is applied to B1 only (1.5 m offset) as a proof of concept
 
 
 **Collaboration**
+
 Branching strategy was agreed at the first meeting — each member worked in their own branch and nothing was merged to main without a pull request review. Meeting logs and task tracking are in Appendix B–E of the report, and we also kept a shared Notion workspace during the project.
